@@ -5,6 +5,30 @@ Official repository for Caliby, a Potts model-based protein sequence design meth
 
 This repository contains code for sequence design, ensemble generation with Protpardelle-1c, ensemble-conditioned sequence design, and sequence scoring.
 
+## Quick Usage
+
+You can use the `Caliby` class for simple in-memory sequence design:
+
+```python
+from Caliby import Caliby
+
+# Initialize the model
+# Ensure you have downloaded the weights first
+model = Caliby(checkpoint_path="checkpoints/caliby_sd.ckpt", device="cuda")
+
+# Load your structure content
+with open("examples/example_data/native_pdbs/7xz3.cif", "r") as f:
+    pdb_content = f.read()
+
+# Generate sequences
+results = model.design(pdb_content, num_seqs=2, temperature=0.1)
+
+for i, res in enumerate(results):
+    print(f"Sample {i} Sequence: {res['seq']}")
+    # res['pdb_string'] contains the designed structure in CIF format
+    # res['scores'] contains the scores
+```
+
 Both this repository and Caliby are still under active development, so please reach out if you have any questions or feature requests! To re-train Caliby, training and dataset preprocessing code should mostly be provided within this repository, but we plan to update in the future with more detailed instructions.
 
 <img src="assets/sampling_gif.gif" alt="Sequence design trajectory" width="600"/>
