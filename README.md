@@ -1,9 +1,8 @@
 <img src="assets/caliby.jpg" alt="Caliby" width="175"/>
 
 # Caliby
-Official repository for Caliby, a Potts model-based protein sequence design method that can condition on structural ensembles. For more details, read our preprint: [Ensemble-conditioned protein sequence design with Caliby](https://www.biorxiv.org/content/10.1101/2025.09.30.679633v4)
+This is a forked repo of Caliby for faster in-memory implementation.
 
-This repository contains code for sequence design, ensemble generation with Protpardelle-1c, ensemble-conditioned sequence design, and sequence scoring.
 
 ## Quick Usage
 
