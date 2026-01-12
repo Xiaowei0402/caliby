@@ -13,7 +13,7 @@ from omegaconf import OmegaConf, DictConfig
 from atomworks.io.parser import parse as aw_parse
 from atomworks.io.utils import non_rcsb
 from atomworks.io.utils.io_utils import to_cif_string
-from atomworks.ml.utils.token import spread_token_wise, apply_token_wise
+from atomworks.ml.utils.token import spread_token_wise, apply_token_wise, get_token_starts
 
 from caliby.checkpoint_utils import get_cfg_from_ckpt
 from caliby.data.data import to
@@ -58,7 +58,8 @@ class Caliby:
         # Load sampling config
         # Try to locate the default sampling config file relative to the package
         base_dir = Path(__file__).resolve().parent
-        default_sampling_cfg_path = base_dir / "caliby/configs/eval/sampling/seq_des/seq_denoiser.yaml"
+        # Fixed path based on file search
+        default_sampling_cfg_path = base_dir / "caliby/configs/seq_des/atom_mpnn_inference.yaml"
         
         if default_sampling_cfg_path.exists():
              sampling_cfg = OmegaConf.load(default_sampling_cfg_path)
@@ -73,6 +74,10 @@ class Caliby:
                 # These are often used in sampling masks
                 "ensemble_ignore_res_idx_mismatch": False,
                 "omit_aas": None, 
+                "gaussian_conformers_cfg": {
+                    "n_conformers": 0,
+                    "noise_std": 0.0
+                }
             })
 
         if overrides:
@@ -149,7 +154,8 @@ class Caliby:
                pdb_content: str, 
                num_seqs: int = 1, 
                temperature: float = 0.1,
-               fixed_positions: pd.DataFrame = None) -> list[dict[str, Any]]:
+               fixed_positions: dict[str, list[int]] = None,
+               override_sequence: dict[str, str] = None) -> list[dict[str, Any]]:
         """
         Design sequences for a given PDB structure.
 
@@ -157,7 +163,8 @@ class Caliby:
             pdb_content: content of the PDB/CIF file.
             num_seqs: number of sequences to generate.
             temperature: sampling temperature.
-            fixed_positions: DataFrame specifying fixed positions (optional).
+            fixed_positions: Dict specifying fixed positions, e.g. {'A': [1, 2], 'B': [10]} (optional).
+            override_sequence: Dict specifying sequence overrides per chain, e.g. {'A': 'ACDEF'} (optional).
 
         Returns:
             List of dictionaries containing 'seq', 'pdb_string', 'scores'.
@@ -177,9 +184,9 @@ class Caliby:
         # Initialize masks
         batch = self._initialize_sampling_masks(batch)
         
-        # Parse fixed positions 
-        if fixed_positions is not None:
-             batch = self._apply_fixed_positions(batch, fixed_positions)
+        # Parse fixed positions and override sequence
+        if fixed_positions is not None or override_sequence is not None:
+             batch = self._apply_constraints(batch, fixed_positions, override_sequence)
             
         # Sampling inputs
         sampling_inputs = OmegaConf.to_container(sampling_cfg, resolve=True)
@@ -271,21 +278,70 @@ class Caliby:
 
         return batch
 
-    def _apply_fixed_positions(self, batch, pos_constraint_df):
-        from caliby.eval.eval_utils.seq_des_utils import parse_fixed_pos_info
+    def _apply_constraints(self, batch, fixed_positions: dict[str, list[int]], override_sequence: dict[str, str]):
+        """
+        Apply fixed positions and override sequence constraints to the batch.
+        """
+        # Assuming batch specific for one example duplicated or single
+        # Here we only handle the single example case effectively (B=1)
         
-        # We need to ensure the batch's example_id matches the dataframe index
-        # We set example_id to "input_pdb", so the dataframe must use that if it's external
-        # If the user passes a generic list, we might need to construct the DF
+        # Get atom array (assuming single example)
+        atom_array = batch["atom_array"][0] # This is a reference, modifying it affects batch if linked
         
-        # Assuming user passes a DF correctly indexed with "input_pdb" or 
-        # we construct one.
-        # But parse_fixed_pos_info checks batch['example_id'] vs df.index.
-        # batch['example_id'] is ["input_pdb"].
+        # Get token mapping
+        token_starts = get_token_starts(atom_array)
+        token_chain_ids = atom_array.chain_id[token_starts]
         
-        if "input_pdb" not in pos_constraint_df.index:
-            # If the user provided rules under a different name, we might want to remap
-            # Or assume the user knows to use "input_pdb"
-            pass
+        # 1. Override sequence
+        if override_sequence:
+            for chain_id, seq_str in override_sequence.items():
+                # Identify tokens for this chain
+                chain_indices = np.where(token_chain_ids == chain_id)[0]
+                
+                if len(chain_indices) == 0:
+                     continue # Or warn
+                     
+                if len(seq_str) != len(chain_indices):
+                     raise ValueError(f"Override sequence length for chain {chain_id} is {len(seq_str)}, "
+                                      f"but structure has {len(chain_indices)} residues.")
+                
+                # Encode sequence
+                encoded_seq = const.AF3_ENCODING.encode_aa_seq(seq_str)
+                encoded_tensor = torch.tensor(encoded_seq, device=self.device)
+                one_hot = F.one_hot(encoded_tensor, num_classes=const.AF3_ENCODING.n_tokens).float()
+                
+                # Update restype
+                batch["restype"][0, chain_indices] = one_hot
+
+            # Sync atom array annotations (res_name) with updated restype
+            num_tokens = int(batch["token_pad_mask"][0].sum())
+            current_tokens = torch.argmax(batch["restype"][0, :num_tokens], dim=-1).cpu().numpy()
+            resnames_3letter = const.AF3_ENCODING.idx_to_token[current_tokens]
+            atomwise_resnames = spread_token_wise(atom_array, resnames_3letter)
+            atom_array.set_annotation("res_name", atomwise_resnames)
             
-        return parse_fixed_pos_info(batch, pos_constraint_df)
+        # 2. Fixed positions
+        if fixed_positions:
+            token_res_ids = atom_array.res_id[token_starts]
+            
+            # Create set of fixed (chain, res_id) tuples for O(1) lookup
+            fixed_set = set()
+            for chain, res_list in fixed_positions.items():
+                for res_id in res_list:
+                    fixed_set.add((chain, res_id))
+            
+            # Identify which tokens are fixed
+            num_tokens = int(batch["token_pad_mask"][0].sum())
+            mask_indices = []
+            
+            for k in range(num_tokens):
+                chain = token_chain_ids[k]
+                res_id = token_res_ids[k]
+                if (chain, res_id) in fixed_set:
+                    mask_indices.append(k)
+            
+            if mask_indices:
+                # Set seq_cond_mask to 1 at these positions
+                batch["seq_cond_mask"][0, mask_indices] = 1.0
+
+        return batch

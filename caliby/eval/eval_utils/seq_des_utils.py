@@ -78,12 +78,12 @@ def get_seq_des_model(cfg: DictConfig, device: str) -> dict[str, Any]:
     model_name = cfg.model_name
     seq_des_model = {"model_name": model_name, "cfg": cfg, "device": device}
 
-    lit_sd_model = LitSeqDenoiser.load_from_checkpoint(cfg.atom_mpnn.ckpt_path).eval()
+    lit_sd_model = LitSeqDenoiser.load_from_checkpoint(cfg.atom_mpnn.ckpt_path, map_location=device).eval()
     model_cfg, _ = get_cfg_from_ckpt(cfg.atom_mpnn.ckpt_path)
     data_cfg = hydra.utils.instantiate(model_cfg.data)
     sampling_cfg = OmegaConf.load(cfg.atom_mpnn.sampling_cfg)
     sampling_cfg = OmegaConf.merge(sampling_cfg, OmegaConf.to_container(cfg.atom_mpnn.overrides, resolve=True))
-    seq_des_model["model"] = lit_sd_model.model
+    seq_des_model["model"] = lit_sd_model.model.to(device)
     seq_des_model["data_cfg"] = data_cfg
     seq_des_model["sampling_cfg"] = sampling_cfg
 
