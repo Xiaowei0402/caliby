@@ -24,6 +24,11 @@ dependencies = [
     "pymol-remote",
     "rdkit",
     "typer",
+    "zstandard",
+    "einops",
+    "PyYAML",
+    "torchtyping",
+    "p_tqdm",
 ]
 
 [project.optional-dependencies]

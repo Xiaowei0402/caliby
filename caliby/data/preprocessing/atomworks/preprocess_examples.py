@@ -8,7 +8,7 @@ from pathlib import Path
 import hydra
 import torch
 import yaml
-from atomworks.ml.datasets.datasets import StructuralDatasetWrapper
+from atomworks.ml.datasets import StructuralDatasetWrapper
 from omegaconf import DictConfig, OmegaConf, open_dict
 from tqdm import tqdm
 

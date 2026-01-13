@@ -20,6 +20,11 @@ cd caliby
 pip install -e .
 ```
 
+To include `atomworks` (required for some data preprocessing scripts):
+```bash
+pip install -e ".[atomworks]"
+```
+
 ### Handling PyArrow Conflicts
 Some packages (like `atomworks`) may strictly pin `pyarrow==17.0.0`, which can conflict with other requirements in your environment (e.g. `pyarrow>=21.0.0`). 
 
