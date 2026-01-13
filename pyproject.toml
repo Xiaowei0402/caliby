@@ -29,10 +29,8 @@ dependencies = [
     "PyYAML",
     "torchtyping",
     "p_tqdm",
+    "atomworks==2.2.0",
 ]
-
-[project.optional-dependencies]
-atomworks = ["atomworks"]
 
 [tool.setuptools.packages.find]
 where = ["."]

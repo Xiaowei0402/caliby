@@ -20,22 +20,19 @@ cd caliby
 pip install -e .
 ```
 
-To include `atomworks` (required for some data preprocessing scripts):
-```bash
-pip install -e ".[atomworks]"
-```
-
 ### Handling PyArrow Conflicts
-Some packages (like `atomworks`) may strictly pin `pyarrow==17.0.0`, which can conflict with other requirements in your environment (e.g. `pyarrow>=21.0.0`). 
+Some versions of `atomworks` strictly pin `pyarrow==17.0.0`, which can conflict with other requirements in your environment (e.g. `pyarrow>=21.0.0`). 
 
-To resolve this while using this fork:
-1. Install `caliby` dependencies (which now allow higher `pyarrow` versions):
+If you encounter installation errors related to `pyarrow` and `atomworks`:
+1. Install `caliby` dependencies while ignoring `atomworks`'s rigid pins:
    ```bash
-   pip install .
+   pip install . --no-deps
+   # Then manually install other dependencies or:
+   pip install torch lightning hydra-core omegaconf biotite numpy pandas scipy tqdm rdkit zstandard einops PyYAML torchtyping p_tqdm
    ```
-2. Install `atomworks` without its dependencies to bypass the rigid `pyarrow` pin:
+2. For the best compatibility with modern Arrow versions, you can install `atomworks` via:
    ```bash
-   pip install atomworks --no-deps
+   pip install atomworks==2.2.0 --no-deps
    ```
 
 ### Post-Installation Setup
