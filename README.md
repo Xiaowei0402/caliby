@@ -3,18 +3,52 @@
 # Caliby
 This is a forked repo of Caliby for faster in-memory implementation.
 
+## Caliby Wrapper Installation (Recommended)
+To use the `Caliby` wrapper class from anywhere, you have two options:
+
+### Option A: Direct Installation (Simplest)
+Install directly from GitHub without cloning:
+```bash
+pip install "git+https://github.com/Xiaowei0402/caliby.git@main"
+```
+
+### Option B: Local Development Installation
+Clone the repo if you need to run examples or modify the code:
+```bash
+git clone https://github.com/Xiaowei0402/caliby.git
+cd caliby
+pip install -e .
+```
+
+### Post-Installation Setup
+The `caliby` package automatically handles the environment variables required by `atomworks` (`PDB_MIRROR_PATH` and `CCD_MIRROR_PATH`) upon import. 
+
+However, if you are running scripts in this repository directly without importing the `caliby` package, or if you encounter issues, you should manually set them in your terminal or activation script:
+
+```bash
+# Manual setup (copy-paste in terminal or add to ~/.bashrc)
+export PDB_MIRROR_PATH=""
+export CCD_MIRROR_PATH=""
+
+# Or add to your venv activation script for automatic loading
+echo 'export PDB_MIRROR_PATH=""' >> path/to/your/venv/bin/activate
+echo 'export CCD_MIRROR_PATH=""' >> path/to/your/venv/bin/activate
+```
 
 ## Quick Usage
 
-You can use the `Caliby` wrapper class for simple in-memory sequence design and scoring:
+You can now use the `Caliby` wrapper class as a pip-installable package. Model weights will be **automatically downloaded** to `~/.cache/caliby/` the first time you initialize the model (approx. 400MB).
 
 ```python
 import pandas as pd
-from Caliby import Caliby
+from caliby import Caliby
 
-# Initialize the model
-# Ensure you have downloaded the weights first (see below)
-model = Caliby(checkpoint_path="model_params/caliby/caliby.ckpt", device="cuda", seed=0)
+# 1. Initialize the model
+# Auto-detects weights or downloads them automatically if missing.
+model = Caliby(device="cuda", seed=0)
+
+# Optionally load the soluble model instead
+# model = Caliby(use_soluble=True, device="cuda")
 
 # Load your structure content
 with open("examples/example_data/native_pdbs/7xz3.cif", "r") as f:
@@ -72,8 +106,11 @@ Both this repository and Caliby are still under active development, so please re
 <img src="assets/sampling_gif.gif" alt="Sequence design trajectory" width="600"/>
 
 # Table of Contents
+---
+**Note: The following sections are the original README from Caliby for reference.**
+
 - [Installation](#installation)
-  - [Option 1: Basic `uv` installation (preferred)](#option-1-basic-uv-installation-preferred)
+  - [Option 1: Basic `uv` installation](#option-1-basic-uv-installation)
   - [Option 2: Apptainer installation](#option-2-apptainer-installation)
 - [Download model weights](#download-model-weights)
 - [Usage](#usage)
@@ -93,15 +130,15 @@ Both this repository and Caliby are still under active development, so please re
 - [Citation](#citation)
 
 # Installation
-Follow the below instructions for setting up the environment. After you've installed the environment, edit `env_setup.sh` to point to your environment directory, and run `source env_setup.sh` before running any scripts (see example scripts in `examples/scripts`).
+Follow the below instructions for setting up the environment. After you've installed the environment, edit `env_setup.sh` to point to your environment directory, and run `source env_setup.sh` before running any scripts.
 
-## Option 1: Basic `uv` installation (preferred)
-To run the scripts in this repository, we recommend using `uv` for package management. If you don't already have `uv` installed, follow the official installation instructions [here](https://docs.astral.sh/uv/getting-started/installation/#installation-methods).
+## Option 1: Basic `uv` installation
+To run the scripts in this repository using `uv`:
 
 Then, run the following commands to install the dependencies:
 ```
 # Clone the repository.
-git clone https://github.com/ProteinDesignLab/caliby.git
+git clone https://github.com/Xiaowei0402/caliby.git
 cd caliby
 
 # Create and activate the environment.
@@ -130,11 +167,20 @@ apptainer exec --nv \
 ```
 
 ## Download model weights
-To download the model weights, run `./download_model_params.sh`, which will download the model weights from [Zenodo](https://zenodo.org/records/17263678) and extract them into the `model_params/` directory. These weights include both the Caliby model and the Protpardelle-1c model.
+Weights are not included in the package due to size. You can download them automatically using the wrapper:
+
+```python
+from caliby import Caliby
+
+# Download to default location (~/.cache/caliby)
+Caliby.download_weights()
+```
+
+Alternatively, you can manually run `./download_model_params.sh`, which will download from [Zenodo](https://zenodo.org/records/17263678) and extract into the `model_params/` directory.
 
 We offer two model checkpoints for Caliby:
 - `caliby.ckpt`: the default Caliby model trained on all chains in the PDB with 0.3Å Gaussian noise.
-- `soluble_caliby.ckpt`: SolubleCaliby, an analog to SolubleMPNN ([Goverde et al., 2024](https://www.nature.com/articles/s41586-024-07601-y)) trained by excluding all annotated transmembrane proteins.
+- `soluble_caliby.ckpt`: SolubleCaliby, an analog to SolubleMPNN trained by excluding all annotated transmembrane proteins.
 
 # Usage
 

@@ -12,9 +12,9 @@ import importlib.util
 import sys
 
 repo_root = Path(__file__).resolve().parents[1]
-caliby_file = repo_root / "Caliby.py"
+caliby_file = repo_root / "caliby/Caliby.py"
 if not caliby_file.exists():
-    pytest.skip("Caliby.py not found in repo root; skipping tests", allow_module_level=True)
+    pytest.skip("caliby/Caliby.py not found; skipping tests", allow_module_level=True)
 spec = importlib.util.spec_from_file_location("caliby_local", str(caliby_file))
 caliby_mod = importlib.util.module_from_spec(spec)
 sys.modules["caliby_local"] = caliby_mod

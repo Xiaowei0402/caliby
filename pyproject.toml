@@ -6,9 +6,26 @@ build-backend = "setuptools.build_meta"
 name = "caliby"
 version = "0.1"
 requires-python = ">=3.12"
+dependencies = [
+    "torch>=2.6.0",
+    "lightning",
+    "hydra-core",
+    "omegaconf",
+    "biotite",
+    "atomworks",
+    "numpy==1.26.3",
+    "pandas",
+    "scipy",
+    "tqdm",
+]
 
 [tool.setuptools.packages.find]
-exclude = ["tests", "scripts"]
+where = ["."]
+include = ["caliby*", "chroma*"]
+namespaces = true
+
+[tool.setuptools.package-data]
+caliby = ["configs/**/*.yaml", "configs/**/*.json", "configs/**/*.txt"]
 
 [tool.ruff]
 line-length = 120

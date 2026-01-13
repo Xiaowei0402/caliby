@@ -1,4 +1,7 @@
 import io
+import os
+import tarfile
+import urllib.request
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Optional, Union, List, Dict
@@ -35,15 +38,64 @@ except Exception:
 
 
 class Caliby:
-    def __init__(self, checkpoint_path: str, device: str = None, sampling_overrides: dict = None, seed: Optional[int] = None, deterministic: bool = True):
+    def __init__(
+        self,
+        checkpoint_path: Optional[str] = None,
+        use_soluble: bool = False,
+        device: str = None,
+        sampling_overrides: dict = None,
+        seed: Optional[int] = None,
+        deterministic: bool = True
+    ):
         """
         Initialize the Caliby model.
 
         Args:
-            checkpoint_path: Path to the model checkpoint (.ckpt file).
+            checkpoint_path: Path to the model checkpoint (.ckpt file). If None, looks for CALIBY_CHECKPOINT_PATH env var or default locations.
+            use_soluble: Whether to load the soluble model weights. Ignored if checkpoint_path is provided.
             device: Device to run on ("cuda", "cpu", etc.). If None, auto-detect.
             sampling_overrides: Dictionary of overrides for sampling configuration.
+            seed: Optional random seed for reproducibility.
+            deterministic: Whether to use deterministic behavior (slower).
         """
+        # Determine base directory of the caliby package
+        base_dir = Path(__file__).resolve().parent
+
+        # Default checkpoint path if not provided
+        if checkpoint_path is None:
+            # First check environment variable
+            env_path = os.environ.get("CALIBY_CHECKPOINT_PATH")
+            if env_path:
+                checkpoint_path = env_path
+            else:
+                # Select filename based on use_soluble
+                ckpt_name = "soluble_caliby.ckpt" if use_soluble else "caliby.ckpt"
+                
+                # Check possible locations
+                repo_path = base_dir.parent / "model_params/caliby" / ckpt_name
+                cache_path = Path.home() / ".cache/caliby/model_params/caliby" / ckpt_name
+                
+                if repo_path.exists():
+                    checkpoint_path = str(repo_path)
+                elif cache_path.exists():
+                    checkpoint_path = str(cache_path)
+                else:
+                    # Not found anywhere, trigger automatic download
+                    print(f"Weights not found for {'soluble_' if use_soluble else ''}caliby. Initiating automatic download...")
+                    self.download_weights()  # Defaults to ~/.cache/caliby
+                    
+                    if cache_path.exists():
+                        checkpoint_path = str(cache_path)
+                    else:
+                        raise FileNotFoundError(
+                            f"Model weights could not be found or downloaded to {cache_path}. "
+                            "Please check your internet connection or set CALIBY_CHECKPOINT_PATH manually."
+                        )
+        
+        # Final check if user provided a path that doesn't exist
+        if not Path(checkpoint_path).exists():
+            raise FileNotFoundError(f"Selected checkpoint path does not exist: {checkpoint_path}")
+
         self.checkpoint_path = checkpoint_path
         self.device = device if device else ("cuda" if torch.cuda.is_available() else "cpu")
         
@@ -55,6 +107,49 @@ class Caliby:
         self.model, self.data_cfg, self.sampling_cfg = self._load_model(checkpoint_path, sampling_overrides)
         self.model.eval()
         self.model.to(self.device)
+
+    @staticmethod
+    def download_weights(target_dir: Optional[Union[str, Path]] = None) -> None:
+        """
+        Download and extract model weights from Zenodo.
+
+        Args:
+            target_dir: Directory to extract weights into. Defaults to ~/.cache/caliby.
+        """
+        if target_dir is None:
+            target_dir = Path.home() / ".cache/caliby"
+        else:
+            target_dir = Path(target_dir)
+
+        target_dir.mkdir(parents=True, exist_ok=True)
+        
+        tar_path = target_dir / "model_params.tar"
+        url = "https://zenodo.org/records/17263678/files/model_params.tar?download=1"
+
+        print(f"Downloading model weights to {tar_path}...")
+        try:
+            # Simple progress reporting
+            def progress(count, block_size, total_size):
+                if total_size > 0:
+                    percent = int(count * block_size * 100 / total_size)
+                    print(f"\rDownload progress: {percent}%", end="")
+
+            urllib.request.urlretrieve(url, tar_path, reporthook=progress)
+            print("\nDownload complete.")
+
+            print(f"Extracting weights to {target_dir}...")
+            with tarfile.open(tar_path, "r") as tar:
+                tar.extractall(path=target_dir)
+            
+            # Clean up tar file
+            tar_path.unlink()
+            print("Extraction complete. Weights are ready.")
+
+        except Exception as e:
+            print(f"Error during download/extraction: {e}")
+            if tar_path.exists():
+                tar_path.unlink()
+            raise
 
     def set_seed(self, seed: int, deterministic: bool = True) -> None:
         """Set global random seeds for Python, NumPy, PyTorch, and Lightning (if available).
@@ -109,8 +204,8 @@ class Caliby:
         # Load sampling config
         # Try to locate the default sampling config file relative to the package
         base_dir = Path(__file__).resolve().parent
-        # Fixed path based on file search
-        default_sampling_cfg_path = base_dir / "caliby/configs/seq_des/atom_mpnn_inference.yaml"
+        # The base_dir is already inside 'caliby/'
+        default_sampling_cfg_path = base_dir / "configs/seq_des/atom_mpnn_inference.yaml"
         
         if default_sampling_cfg_path.exists():
              sampling_cfg = OmegaConf.load(default_sampling_cfg_path)
