@@ -1,4 +1,4 @@
-import tempfile
+import io
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Optional, Union, List, Dict
@@ -32,6 +32,7 @@ try:
     import lightning as _lightning
 except Exception:
     _lightning = None
+
 
 class Caliby:
     def __init__(self, checkpoint_path: str, device: str = None, sampling_overrides: dict = None, seed: Optional[int] = None, deterministic: bool = True):
@@ -137,68 +138,83 @@ class Caliby:
 
     def _process_input(self, pdb_content: str, suffix: str = None, example_id: str = "input_pdb") -> dict[str, Any]:
         """Parse, preprocess, and featurize a PDB/CIF string."""
-        
-        # Auto-detect suffix if not provided
-        if suffix is None:
+
+        # Auto-detect file type if not provided
+        file_type = None
+        if suffix is not None:
+            file_type = suffix.lstrip(".")
+
+        if file_type is None:
             if pdb_content.strip().startswith("data_"):
-                suffix = ".cif"
+                file_type = "cif"
             elif "ATOM " in pdb_content or "HETATM" in pdb_content:
-                suffix = ".pdb"
+                file_type = "pdb"
             else:
-                # Default to cif if ambiguous or maybe fasta (not supported here yet)
-                suffix = ".cif"
-            
-        # Write pdb_content to temp file for aw_parse
-        with tempfile.NamedTemporaryFile(mode='w', suffix=suffix) as tmp_file:
-            tmp_file.write(pdb_content)
-            tmp_file.flush()
-            
-            # Setup CIF parser args
-            if hasattr(self.data_cfg, "cif_parser_args"):
-                cif_parser_args = OmegaConf.to_container(self.data_cfg.cif_parser_args, resolve=True)
-            else:
-                # Default args if not found in config
-                cif_parser_args = {
-                    "add_missing_atoms": True,
-                    "remove_waters": True,
-                    "remove_ccds": [],
-                    "fix_ligands_at_symmetry_centers": True,
-                    "fix_arginines": True,
-                    "convert_mse_to_met": True,
-                    "hydrogen_policy": "remove",
-                }
-            
-            # aw_parse usually returns a dict with 'assemblies'
-            # We assume transformation_id "1" is standard
-            transformation_id = "1"
-            cif_parser_args["build_assembly"] = [transformation_id]
-            
-            try:
-                input_data = aw_parse(tmp_file.name, **cif_parser_args)
-            except Exception as e:
-                # If parsing fails, it might be due to format mismatch or empty content
-                raise ValueError(f"Failed to parse input structure: {e}")
+                # Default to cif if ambiguous
+                file_type = "cif"
 
-            if "assemblies" not in input_data or transformation_id not in input_data["assemblies"]:
-                 raise ValueError("Parsed data does not contain expected assembly information.")
+        # Setup CIF parser args
+        if hasattr(self.data_cfg, "cif_parser_args"):
+            cif_parser_args = OmegaConf.to_container(self.data_cfg.cif_parser_args, resolve=True)
+        else:
+            # Default args if not found in config
+            cif_parser_args = {
+                "add_missing_atoms": True,
+                "remove_waters": True,
+                "remove_ccds": [],
+                "fix_ligands_at_symmetry_centers": True,
+                "fix_arginines": True,
+                "convert_mse_to_met": True,
+                "hydrogen_policy": "remove",
+            }
 
-            atom_array_from_cif = input_data["assemblies"][transformation_id][0]
+        # aw_parse usually returns a dict with 'assemblies'
+        # We assume transformation_id "1" is standard
+        transformation_id = "1"
+        cif_parser_args["build_assembly"] = [transformation_id]
 
-            # Preprocess
-            pipeline = preprocess_transform()
-            example = pipeline(
-                data={
-                    "example_id": example_id,
-                    "atom_array": atom_array_from_cif,
-                    "chain_info": input_data["chain_info"],
-                }
-            )
+        # Use StringIO to avoid temp files.
+        # Note: atomworks.io.parser._parse_from_pdb has a bug where it calls Path(filename)
+        # on buffers. We temporarily monkeypatch Path in that module to handle buffers safely.
+        import atomworks.io.parser as aw_parser_mod
+        original_path = aw_parser_mod.Path
 
-            # Featurize
-            featurizer = sd_featurizer()
-            example = featurizer(example)
-            
-            return example
+        def buffer_friendly_path(x):
+            if isinstance(x, (io.StringIO, io.BytesIO)):
+                return original_path(f"input.{file_type}")
+            return original_path(x)
+
+        aw_parser_mod.Path = buffer_friendly_path
+
+        try:
+            # Pass content directly via StringIO buffer
+            input_data = aw_parse(io.StringIO(pdb_content), file_type=file_type, **cif_parser_args)
+        except Exception as e:
+            # If parsing fails, it might be due to format mismatch or empty content
+            raise ValueError(f"Failed to parse input structure: {e}")
+        finally:
+            aw_parser_mod.Path = original_path
+
+        if "assemblies" not in input_data or transformation_id not in input_data["assemblies"]:
+            raise ValueError("Parsed data does not contain expected assembly information.")
+
+        atom_array_from_cif = input_data["assemblies"][transformation_id][0]
+
+        # Preprocess
+        pipeline = preprocess_transform()
+        example = pipeline(
+            data={
+                "example_id": example_id,
+                "atom_array": atom_array_from_cif,
+                "chain_info": input_data["chain_info"],
+            }
+        )
+
+        # Featurize
+        featurizer = sd_featurizer()
+        example = featurizer(example)
+
+        return example
 
     def design(self,
                pdb_content: str,
@@ -391,9 +407,13 @@ def _finalize_constraints(batch, sampling_cfg, pos_constraint_df):
         # Normalize index if pdb_key is provided
         if "pdb_key" in pos_constraint_df.columns:
             pos_constraint_df = pos_constraint_df.set_index("pdb_key")
-            # For singe-target in-memory designed to map the provided row to input batch
-            if pos_constraint_df.shape[0] == 1:
-                example_id_val = batch["example_id"][0]
+
+        # For single-target in-memory design, if the dataframe has one row, 
+        # map it to the current batch's example_id to ensure constraints are applied.
+        if pos_constraint_df.shape[0] == 1:
+            example_id_val = batch["example_id"][0]
+            if pos_constraint_df.index[0] != example_id_val:
+                pos_constraint_df = pos_constraint_df.copy()
                 pos_constraint_df.index = [example_id_val]
 
         if _seq_des_utils is not None:

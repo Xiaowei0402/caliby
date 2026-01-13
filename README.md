@@ -6,77 +6,64 @@ This is a forked repo of Caliby for faster in-memory implementation.
 
 ## Quick Usage
 
-You can use the `Caliby` class for simple in-memory sequence design:
+You can use the `Caliby` wrapper class for simple in-memory sequence design and scoring:
 
 ```python
+import pandas as pd
 from Caliby import Caliby
 
 # Initialize the model
-# Ensure you have downloaded the weights first
-model = Caliby(checkpoint_path="checkpoints/caliby_sd.ckpt", device="cuda")
+# Ensure you have downloaded the weights first (see below)
+model = Caliby(checkpoint_path="model_params/caliby/caliby.ckpt", device="cuda", seed=0)
 
 # Load your structure content
 with open("examples/example_data/native_pdbs/7xz3.cif", "r") as f:
     pdb_content = f.read()
 
-# Generate sequences
+# 1. Basic Design
 results = model.design(pdb_content, num_seqs=2, temperature=0.1)
+print(f"Designed sequence: {results[0]['seq']}")
 
-for i, res in enumerate(results):
-    print(f"Sample {i} Sequence: {res['seq']}")
-    # res['pdb_string'] contains the designed structure in CIF format
-    # res['scores'] contains the scores
+# 2. Design with Constraints
+# resid: index in label_seq_id
+constraints = pd.DataFrame([{
+    "fixed_pos_seq": "A1-10", 
+    "fixed_pos_override_seq": "A20:C",
+    "pos_restrict_aatype": "A21:FL"
+}])
+results_constrained = model.design(pdb_content, pos_constraint_df=constraints)
+
+# 3. Ensemble Design
+# First string in the list is treated as the primary conformer
+ensemble = [pdb_content, open("conformer_1.pdb").read()]
+results_ensemble = model.design_ensemble(ensemble, num_seqs=2)
+
+# 4. Scoring
+score_info = model.score(pdb_content)
+print(f"Energy (U): {score_info['scores']['U']}")
 ```
 
-### In-memory ensembles
+### Position-wise Constraints (pos_constraint_df)
 
-Caliby also accepts ensembles provided entirely in memory. Pass a mapping from an ensemble key (PDB stem) to the conformer data. Supported value formats for each key:
+When using the `Caliby` wrapper, position-wise constraints can be passed as a `pandas.DataFrame`. 
 
-- **Single string**: the PDB/CIF content for one conformer. Example: `{"8xhz": "<PDB string>"}`.
-- **List of strings**: ordered list of PDB/CIF contents (legacy). Example: `{"8xhz": ["<primary>", "<conf1>"]}`.
-- **Dict of filename -> string** (preferred): preserves conformer filenames and ordering. Example:
+| Column Name | Example Format | Description |
+|-------------|----------------|-------------|
+| `fixed_pos_seq` | `A1-10,B1-5` | Residues to keep fixed (identity conditioned on input). |
+| `fixed_pos_scn` | `A1,A3` | Sidechains to keep fixed (must be subset of `fixed_pos_seq`). |
+| `fixed_pos_override_seq` | `A5:G,A6:L` | Override input residue to specific AA and fix it. |
+| `pos_restrict_aatype` | `A10:AVG` | Restrict allowed AA types at specific positions. |
+| `symmetry_pos` | `A1,B1\|A2,B2` | Tie sampling weights between positions (e.g. for homooligomers). |
 
-```
-{
-  "8xhz": {
-    "8xhz.pdb": "<primary pdb content>",
-    "8xhz_conf1.pdb": "<conformer pdb content>",
-    ...
-  }
-}
-```
+**Note on Indexing**: Residue indices should follow the `label_seq_id` (Cif/mmCif standard). In PyMOL, you can view these by running `set cif_use_auth, off` before loading.
 
-Behavior notes:
-- If you pass a dict, Caliby will place `<PDB_KEY>.pdb` (or `<PDB_KEY>.cif`) first as the primary conformer when present, then include other entries in alphabetical order.
-- To run ensemble-conditioned design/score from memory, use the new `design_ensemble` and `score_ensemble` methods on the `Caliby` class. Example:
+### In-memory Ensembles
 
-```python
-from Caliby import Caliby
-cal = Caliby(checkpoint_path="model_params/caliby/caliby.ckpt", device="cpu")
-pdb_to_conformers = {"8xhz": {"8xhz.pdb": open("8xhz.pdb").read(), "8xhz_conf1.pdb": open("8xhz_conf1.pdb").read()}}
-out = cal.design_ensemble(pdb_to_conformers, num_seqs_per_pdb=4)
-```
-
-### Setting random seed
-
-To reproduce the example outputs, set the global random seed. The example Hydra configs default to `seed: 0`.
-
-- For the example scripts (Hydra entrypoints) override the seed on the command line, for example:
-
-```bash
-python3 caliby/eval/sampling/seq_des_multi.py seed=42 ckpt_path=model_params/caliby/caliby.ckpt ...
-```
-
-- For the in-memory `Caliby` wrapper, pass `seed` when constructing or call `set_seed`:
-
-```python
-from Caliby import Caliby
-cal = Caliby(checkpoint_path="model_params/caliby/caliby.ckpt", seed=0, deterministic=True)
-# or later
-cal.set_seed(0, deterministic=True)
-```
-
-Setting `deterministic=True` toggles PyTorch/cuDNN flags to improve reproducibility (`cudnn.deterministic=True`, `cudnn.benchmark=False`). Exact bitwise reproducibility can still depend on hardware and non-deterministic ops.
+The `design_ensemble` and `score_ensemble` methods accept a **list of strings** (`list[str]`). 
+- The **first element** is the **primary conformer**.
+- All subsequent elements are additional decoys/conformers.
+- Caliby aggregates Potts parameters across the ensemble to produce the final design.
+- By default, `design_ensemble` uses the residue configuration (AA types) of the primary structure for initialization, unless overridden by constraints.
 
 
 
