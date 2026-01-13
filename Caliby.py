@@ -1,13 +1,14 @@
 import tempfile
 from collections import defaultdict
 from pathlib import Path
-from typing import Any, Optional, Union
+from typing import Any, Optional, Union, List, Dict
 
 import torch
 import torch.nn.functional as F
 import hydra
 import pandas as pd
 import numpy as np
+import random
 from omegaconf import OmegaConf, DictConfig
 
 from atomworks.io.parser import parse as aw_parse
@@ -24,7 +25,7 @@ from caliby.model.seq_denoiser.lit_sd_model import LitSeqDenoiser
 import caliby.data.const as const
 
 class Caliby:
-    def __init__(self, checkpoint_path: str, device: str = None, sampling_overrides: dict = None):
+    def __init__(self, checkpoint_path: str, device: str = None, sampling_overrides: dict = None, seed: Optional[int] = None, deterministic: bool = True):
         """
         Initialize the Caliby model.
 
@@ -36,10 +37,50 @@ class Caliby:
         self.checkpoint_path = checkpoint_path
         self.device = device if device else ("cuda" if torch.cuda.is_available() else "cpu")
         
+        # Set global RNG seed if provided
+        if seed is not None:
+            self.set_seed(seed, deterministic=deterministic)
+
         # Load model and configs
         self.model, self.data_cfg, self.sampling_cfg = self._load_model(checkpoint_path, sampling_overrides)
         self.model.eval()
         self.model.to(self.device)
+
+    def set_seed(self, seed: int, deterministic: bool = True) -> None:
+        """Set global random seeds for Python, NumPy, PyTorch, and Lightning (if available).
+
+        Args:
+            seed: integer seed to set.
+            deterministic: whether to enable deterministic cuDNN behavior.
+        """
+        # Python random
+        random.seed(seed)
+        # NumPy
+        np.random.seed(seed)
+        # PyTorch
+        torch.manual_seed(seed)
+        if torch.cuda.is_available():
+            torch.cuda.manual_seed_all(seed)
+
+        # Try to use Lightning's seeding if available
+        try:
+            import lightning as L
+
+            L.seed_everything(seed)
+        except Exception:
+            # fallback: already seeded python/numpy/torch
+            pass
+
+        # Set cuDNN deterministic flags to improve reproducibility
+        try:
+            torch.backends.cudnn.deterministic = bool(deterministic)
+            torch.backends.cudnn.benchmark = not bool(deterministic)
+        except Exception:
+            pass
+
+        # Record
+        self.seed = seed
+        self.deterministic = bool(deterministic)
 
     def _load_model(self, ckpt_path: str, overrides: dict = None):
         """Load model, data config, and sampling config from checkpoint."""
@@ -85,7 +126,7 @@ class Caliby:
             
         return lit_sd_model.model, data_cfg, sampling_cfg
 
-    def _process_input(self, pdb_content: str, suffix: str = None) -> dict[str, Any]:
+    def _process_input(self, pdb_content: str, suffix: str = None, example_id: str = "input_pdb") -> dict[str, Any]:
         """Parse, preprocess, and featurize a PDB/CIF string."""
         
         # Auto-detect suffix if not provided
@@ -138,7 +179,7 @@ class Caliby:
             pipeline = preprocess_transform()
             example = pipeline(
                 data={
-                    "example_id": "input_pdb",
+                    "example_id": example_id,
                     "atom_array": atom_array_from_cif,
                     "chain_info": input_data["chain_info"],
                 }
@@ -257,27 +298,8 @@ class Caliby:
                 "scores": aux
             }
         return {}
-        
-    def _initialize_sampling_masks(self, batch: dict[str, Any]) -> dict[str, torch.Tensor]:
-        """Initialize seq_cond and atom_cond masks."""
-        
-        standard_prot_mask = batch["is_protein"] & ~batch["is_atomized"]
-        batch["seq_cond_mask"] = torch.zeros_like(batch["token_pad_mask"])
-        batch["seq_cond_mask"] = torch.where(
-            standard_prot_mask, torch.zeros_like(batch["seq_cond_mask"]), batch["token_resolved_mask"]
-        )
 
-        batch["atom_cond_mask"] = batch["prot_bb_atom_mask"]  # condition on backbone atoms
-
-        atomwise_standard_prot_mask = (
-            torch.gather(standard_prot_mask, dim=-1, index=batch["atom_to_token_map"]) * batch["atom_pad_mask"]
-        )
-        batch["atom_cond_mask"] = torch.where(
-            atomwise_standard_prot_mask.bool(), batch["atom_cond_mask"], batch["atom_resolved_mask"]
-        )
-
-        return batch
-
+    
     def _apply_constraints(self, batch, fixed_positions: dict[str, list[int]], override_sequence: dict[str, str]):
         """
         Apply fixed positions and override sequence constraints to the batch.
@@ -345,3 +367,27 @@ class Caliby:
                 batch["seq_cond_mask"][0, mask_indices] = 1.0
 
         return batch
+
+    def _initialize_sampling_masks(self, batch: dict[str, Any]) -> dict[str, torch.Tensor]:
+        """Delegate sampling mask initialization to shared utility."""
+        try:
+            from caliby.eval.eval_utils import seq_des_utils
+
+            return seq_des_utils.initialize_sampling_masks(batch)
+        except Exception:
+            # Fallback: try to implement minimal behavior inline
+            standard_prot_mask = batch["is_protein"] & ~batch["is_atomized"]
+            batch["seq_cond_mask"] = torch.zeros_like(batch["token_pad_mask"])
+            batch["seq_cond_mask"] = torch.where(
+                standard_prot_mask, torch.zeros_like(batch["seq_cond_mask"]), batch["token_resolved_mask"]
+            )
+
+            batch["atom_cond_mask"] = batch["prot_bb_atom_mask"]
+            atomwise_standard_prot_mask = (
+                torch.gather(standard_prot_mask, dim=-1, index=batch["atom_to_token_map"]) * batch["atom_pad_mask"]
+            )
+            batch["atom_cond_mask"] = torch.where(
+                atomwise_standard_prot_mask.bool(), batch["atom_cond_mask"], batch["atom_resolved_mask"]
+            )
+
+            return batch

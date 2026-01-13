@@ -28,6 +28,58 @@ for i, res in enumerate(results):
     # res['scores'] contains the scores
 ```
 
+### In-memory ensembles
+
+Caliby also accepts ensembles provided entirely in memory. Pass a mapping from an ensemble key (PDB stem) to the conformer data. Supported value formats for each key:
+
+- **Single string**: the PDB/CIF content for one conformer. Example: `{"8xhz": "<PDB string>"}`.
+- **List of strings**: ordered list of PDB/CIF contents (legacy). Example: `{"8xhz": ["<primary>", "<conf1>"]}`.
+- **Dict of filename -> string** (preferred): preserves conformer filenames and ordering. Example:
+
+```
+{
+  "8xhz": {
+    "8xhz.pdb": "<primary pdb content>",
+    "8xhz_conf1.pdb": "<conformer pdb content>",
+    ...
+  }
+}
+```
+
+Behavior notes:
+- If you pass a dict, Caliby will place `<PDB_KEY>.pdb` (or `<PDB_KEY>.cif`) first as the primary conformer when present, then include other entries in alphabetical order.
+- To run ensemble-conditioned design/score from memory, use the new `design_ensemble` and `score_ensemble` methods on the `Caliby` class. Example:
+
+```python
+from Caliby import Caliby
+cal = Caliby(checkpoint_path="model_params/caliby/caliby.ckpt", device="cpu")
+pdb_to_conformers = {"8xhz": {"8xhz.pdb": open("8xhz.pdb").read(), "8xhz_conf1.pdb": open("8xhz_conf1.pdb").read()}}
+out = cal.design_ensemble(pdb_to_conformers, num_seqs_per_pdb=4)
+```
+
+### Setting random seed
+
+To reproduce the example outputs, set the global random seed. The example Hydra configs default to `seed: 0`.
+
+- For the example scripts (Hydra entrypoints) override the seed on the command line, for example:
+
+```bash
+python3 caliby/eval/sampling/seq_des_multi.py seed=42 ckpt_path=model_params/caliby/caliby.ckpt ...
+```
+
+- For the in-memory `Caliby` wrapper, pass `seed` when constructing or call `set_seed`:
+
+```python
+from Caliby import Caliby
+cal = Caliby(checkpoint_path="model_params/caliby/caliby.ckpt", seed=0, deterministic=True)
+# or later
+cal.set_seed(0, deterministic=True)
+```
+
+Setting `deterministic=True` toggles PyTorch/cuDNN flags to improve reproducibility (`cudnn.deterministic=True`, `cudnn.benchmark=False`). Exact bitwise reproducibility can still depend on hardware and non-deterministic ops.
+
+
+
 Both this repository and Caliby are still under active development, so please reach out if you have any questions or feature requests! To re-train Caliby, training and dataset preprocessing code should mostly be provided within this repository, but we plan to update in the future with more detailed instructions.
 
 <img src="assets/sampling_gif.gif" alt="Sequence design trajectory" width="600"/>
