@@ -30,6 +30,37 @@ Caliby = caliby_mod.Caliby
 
 CKPT = Path("model_params/caliby/caliby.ckpt")
 
+
+# Helper utilities for tests
+def make_caliby(seed: int = 0, deterministic: bool = True):
+    cal = Caliby(str(CKPT), seed=seed, deterministic=deterministic)
+    try:
+        cal.set_seed(seed, deterministic=deterministic)
+    except Exception:
+        # Some Caliby builds may not expose set_seed; ignore if missing
+        pass
+    return cal
+
+
+def read_pdb_content(example_id: str):
+    data_dir = Path("tests/test_inputs/native_pdbs")
+    for ext in (".pdb", ".cif"):
+        cand = data_dir / f"{example_id}{ext}"
+        if cand.exists():
+            return cand.read_text()
+    return None
+
+
+def get_pos_constraint_df_for(pdb_key: str):
+    constr_path = Path("tests/test_inputs/native_pdb_constraints.csv")
+    if not constr_path.exists():
+        return None
+    df_constr = pd.read_csv(constr_path)
+    df_sub = df_constr[df_constr["pdb_key"] == pdb_key]
+    if df_sub.empty:
+        return None
+    return df_sub
+
 # unit test for sequence design
 @pytest.mark.skipif(not CKPT.exists(), reason="checkpoint missing; skip integration tests")
 def test_design_single_inmemory_matches_examples():
@@ -38,26 +69,16 @@ def test_design_single_inmemory_matches_examples():
         pytest.skip("Reference seq_des CSV not found")
 
     df = pd.read_csv(csv_path)
-    cal = Caliby(str(CKPT), seed=0, deterministic=True)
-
-    data_dir = Path("tests/test_inputs/native_pdbs")
+    cal = make_caliby(0, True)
 
     grouped = df.groupby("example_id")
 
     # Only check the first example_id from the reference CSV
     # (Because random number behavior differs with batched design calls.)
     example_id, group = next(iter(grouped))
-    # find the input file for this example
-    p = None
-    for ext in (".pdb", ".cif"):
-        cand = data_dir / f"{example_id}{ext}"
-        if cand.exists():
-            p = cand
-            break
-    if p is None:
-        pytest.skip(f"Input file for {example_id} not found in {data_dir}")
-
-    content = p.read_text()
+    content = read_pdb_content(example_id)
+    if content is None:
+        pytest.skip(f"Input file for {example_id} not found in tests/test_inputs/native_pdbs")
 
     expected_rows = list(group.itertuples(index=False, name=None))
     num_expected = len(expected_rows)
@@ -96,40 +117,21 @@ def test_design_with_pos_constraints():
     group = df_out[df_out["example_id"] == first_example_id]
 
     # Find matching constraint row (pdb_key matches example_id)
-    constr_row = df_constr[df_constr["pdb_key"] == first_example_id]
-    if constr_row.empty:
+    pos_constraint_df = df_constr[df_constr["pdb_key"] == first_example_id]
+    if pos_constraint_df.empty:
         pytest.skip(f"No constraints found for {first_example_id}")
 
-    constr_row = constr_row.iloc[0]
-
-    # Parse fixed_pos_seq like "A6-15,A20-50" into dict {'A':[6,7,...]}
-    raw_fixed = constr_row.get("fixed_pos_seq", "") if "fixed_pos_seq" in constr_row.index else ""
-    fixed_positions = parse_fixed_pos_seq(raw_fixed)
-
-    # Parse fixed_pos_scn (sidechain constraints) into fixed_sidechains
-    raw_scn = constr_row.get("fixed_pos_scn", "") if "fixed_pos_scn" in constr_row.index else ""
-    fixed_sidechains = parse_fixed_pos_seq(raw_scn)
-
     # Now run Caliby.design with these fixed positions and compare sequences
-    cal = Caliby(str(CKPT), seed=0, deterministic=True)
-    # find the input file for this example
-    data_dir = Path("tests/test_inputs/native_pdbs")
-    p = None
-    for ext in (".pdb", ".cif"):
-        cand = data_dir / f"{first_example_id}{ext}"
-        if cand.exists():
-            p = cand
-            break
-    if p is None:
-        pytest.skip(f"Input file for {first_example_id} not found in {data_dir}")
-
-    content = p.read_text()
+    cal = make_caliby(0, True)
+    content = read_pdb_content(first_example_id)
+    if content is None:
+        pytest.skip(f"Input file for {first_example_id} not found in tests/test_inputs/native_pdbs")
 
     expected_rows = list(group.itertuples(index=False, name=None))
     num_expected = len(expected_rows)
 
     cal.set_seed(0, deterministic=True)
-    results = cal.design(content, num_seqs=num_expected, fixed_positions=fixed_positions, fixed_sidechains=fixed_sidechains)
+    results = cal.design(content, num_seqs=num_expected, pos_constraint_df=pos_constraint_df,)
 
     got_seqs = [r.get("seq", "") for r in results]
     expected_seqs = list(group["seq"])
@@ -149,18 +151,9 @@ def test_design_override_seq_positions_7xz3():
         pytest.skip("Constraints CSV not found")
 
     df_constr = pd.read_csv(constr_path)
-    constr_row = df_constr[df_constr["pdb_key"] == "7xz3"]
-    if constr_row.empty:
+    pos_constraint_df = df_constr[df_constr["pdb_key"] == "7xz3"]
+    if pos_constraint_df.empty:
         pytest.skip("No constraint row for 7xz3")
-    constr_row = constr_row.iloc[0]
-
-    raw_override = constr_row.get("fixed_pos_override_seq", "") if "fixed_pos_override_seq" in constr_row.index else ""
-    # parse "A36:C,A37:C,..." into { 'A': {36:'C',37:'C',...} }
-    override_seq = None
-    raw_override = constr_row.get("fixed_pos_override_seq", "") if "fixed_pos_override_seq" in constr_row.index else ""
-    
-
-    override_seq = parse_override_seq(raw_override)
 
     # load pdb
     data_dir = Path("tests/test_inputs/native_pdbs")
@@ -175,51 +168,11 @@ def test_design_override_seq_positions_7xz3():
 
     content = p.read_text()
 
-    cal = Caliby(str(CKPT), seed=0, deterministic=True)
-    cal.set_seed(0, deterministic=True)
-
-    # # compute token -> chain position mapping from the processed example
-    # example = cal._process_input(content)
-    # atom_array = example["atom_array"]
-    
-    # token_starts = get_token_starts(atom_array)
-    # token_chain_ids = atom_array.chain_id[token_starts]
-    # token_res_ids = atom_array.res_id[token_starts]
-
-    # # find token indices for residues 36..40 on chain 'A'
-    # target_token_indices = []
-    # for k in range(len(token_chain_ids)):
-    #     if token_chain_ids[k] == 'A' and token_res_ids[k] in (36, 37, 38, 39, 40):
-    #         target_token_indices.append(k)
-    # assert len(target_token_indices) == 5, f"Couldn't map all target residues to tokens: {target_token_indices}"
-
-    # # map token idx -> position within chain (0-based)
-    # chain_indices = [i for i in range(len(token_chain_ids)) if token_chain_ids[i] == 'A']
-    # token_to_pos = {tok: chain_indices.index(tok) for tok in chain_indices}
-    # target_positions = [token_to_pos[tok] for tok in sorted(target_token_indices)]
-
-    # # Also verify _apply_constraints updates the batch restype appropriately (internal check)
-    # example_proc = cal._process_input(content)
-    # batch = sd_collator([example_proc])
-    # batch = to(batch, cal.device)
-    # # apply constraint to batch
-    # cal._apply_constraints(batch, None, None, override_seq)
-    # # determine expected token indices (from earlier mapping)
-    # # token indices for residue ids 36..40 (we computed target_token_indices above)
-
-    # c_idx = _const.AF3_ENCODING.encode_aa_seq('C')[0]
-    # for tok in sorted(target_token_indices):
-    #     # batch['restype'] shape: (B, T, n_tokens)
-    #     idx = int(torch.argmax(batch['restype'][0, tok]).item())
-    #     assert idx == c_idx, f"Token {tok} not overridden to C (got idx {idx}, expected {c_idx})"
-
-    # finally run sampling to ensure no runtime errors (not asserting output residues here)
-    results = cal.design(content, num_seqs=4, override_seq=override_seq)
+    cal = make_caliby(0, True)
+    results = cal.design(content, num_seqs=4, pos_constraint_df=pos_constraint_df)
 
     got_seqs = [r.get("seq", "") for r in results]
 
-    breakpoint()
-    
     for seq in got_seqs:
         assert seq[35:40] == "CCCCC", f"Override failed, got residues 36-40 as {seq[35:40]} instead of CCCCC"
 
