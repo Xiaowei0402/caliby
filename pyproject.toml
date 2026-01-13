@@ -12,12 +12,22 @@ dependencies = [
     "hydra-core",
     "omegaconf",
     "biotite",
-    "atomworks",
-    "numpy==1.26.3",
+    "numpy>=1.26.3",
+    "pyarrow>=17.0.0",
     "pandas",
     "scipy",
     "tqdm",
+    "cython",
+    "cytoolz",
+    "hydride",
+    "py3dmol",
+    "pymol-remote",
+    "rdkit",
+    "typer",
 ]
+
+[project.optional-dependencies]
+atomworks = ["atomworks"]
 
 [tool.setuptools.packages.find]
 where = ["."]

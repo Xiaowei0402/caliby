@@ -20,6 +20,19 @@ cd caliby
 pip install -e .
 ```
 
+### Handling PyArrow Conflicts
+Some packages (like `atomworks`) may strictly pin `pyarrow==17.0.0`, which can conflict with other requirements in your environment (e.g. `pyarrow>=21.0.0`). 
+
+To resolve this while using this fork:
+1. Install `caliby` dependencies (which now allow higher `pyarrow` versions):
+   ```bash
+   pip install .
+   ```
+2. Install `atomworks` without its dependencies to bypass the rigid `pyarrow` pin:
+   ```bash
+   pip install atomworks --no-deps
+   ```
+
 ### Post-Installation Setup
 The `caliby` package automatically handles the environment variables required by `atomworks` (`PDB_MIRROR_PATH` and `CCD_MIRROR_PATH`) upon import. 
 
