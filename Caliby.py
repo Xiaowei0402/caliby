@@ -196,7 +196,9 @@ class Caliby:
                num_seqs: int = 1, 
                temperature: float = 0.1,
                fixed_positions: dict[str, list[int]] = None,
-               override_sequence: dict[str, str] = None) -> list[dict[str, Any]]:
+               fixed_sidechains: dict[str, list[int]] = None,
+               override_seq: dict[str, Any] = None,
+               pos_restrict_aatype: dict[str, Any] = None) -> list[dict[str, Any]]:
         """
         Design sequences for a given PDB structure.
 
@@ -205,7 +207,11 @@ class Caliby:
             num_seqs: number of sequences to generate.
             temperature: sampling temperature.
             fixed_positions: Dict specifying fixed positions, e.g. {'A': [1, 2], 'B': [10]} (optional).
-            override_sequence: Dict specifying sequence overrides per chain, e.g. {'A': 'ACDEF'} (optional).
+            fixed_sidechains: Dict specifying sidechain-fixed residues, e.g. {'A':[6,7]} (optional).
+            override_seq: Per-chain override specification. Can be either legacy full-sequence
+                strings `{chain: 'ACDEF'}` or per-position dicts `{chain: {15: 'C', 16: ['A','C']}}`.
+            pos_restrict_aatype: Per-position allowed residue lists, in the same format as
+                per-position entries in `override_seq` (e.g. `{ 'A': {6: ['Q','R']}}`).
 
         Returns:
             List of dictionaries containing 'seq', 'pdb_string', 'scores'.
@@ -225,12 +231,33 @@ class Caliby:
         # Initialize masks
         batch = self._initialize_sampling_masks(batch)
         
-        # Parse fixed positions and override sequence
-        if fixed_positions is not None or override_sequence is not None:
-             batch = self._apply_constraints(batch, fixed_positions, override_sequence)
+        # Finalize constraints: accept parsed inputs directly via parameters
+        final_fixed_positions = fixed_positions or None
+        final_fixed_sidechains = fixed_sidechains or None
+        # Merge override_seq and pos_restrict_aatype into a single override dict consumed by _apply_constraints
+        final_override_sequence = None
+        if override_seq:
+            final_override_sequence = override_seq.copy() if isinstance(override_seq, dict) else override_seq
+        if pos_restrict_aatype:
+            # merge per-position soft restrictions into final_override_sequence structure
+            if final_override_sequence is None:
+                final_override_sequence = {}
+            for chain, pos_map in pos_restrict_aatype.items():
+                if chain not in final_override_sequence or not isinstance(final_override_sequence.get(chain), dict):
+                    final_override_sequence.setdefault(chain, {})
+                for pos, allowed in pos_map.items():
+                    final_override_sequence[chain][int(pos)] = allowed
+
+        # Apply constraints if any provided
+        if final_fixed_positions or final_fixed_sidechains or final_override_sequence:
+            batch = self._apply_constraints(batch, final_fixed_positions, final_fixed_sidechains, final_override_sequence)
             
         # Sampling inputs
         sampling_inputs = OmegaConf.to_container(sampling_cfg, resolve=True)
+        # If _apply_constraints recorded per-token allowed aatypes, pass to sampling inputs
+        if "pos_restrict_aatype" in batch:
+            # model.sample may expect a mapping per-example id; we use the input example id
+            sampling_inputs["pos_restrict_aatype"] = {"input_pdb": batch["pos_restrict_aatype"]}
         # Ensure 'pos_restrict_aatype' and others are initialized if used by model.sample
         if "pos_restrict_aatype" not in sampling_inputs:
              sampling_inputs["pos_restrict_aatype"] = None
@@ -300,7 +327,7 @@ class Caliby:
         return {}
 
     
-    def _apply_constraints(self, batch, fixed_positions: dict[str, list[int]], override_sequence: dict[str, str]):
+    def _apply_constraints(self, batch, fixed_positions: dict[str, list[int]] = None, fixed_sidechains: dict[str, list[int]] = None, override_sequence: dict[str, str] = None):
         """
         Apply fixed positions and override sequence constraints to the batch.
         """
@@ -313,27 +340,74 @@ class Caliby:
         # Get token mapping
         token_starts = get_token_starts(atom_array)
         token_chain_ids = atom_array.chain_id[token_starts]
-        
+
+        # Validate fixed_sidechains is subset of fixed_positions if both provided
+        if fixed_sidechains and not fixed_positions:
+            raise ValueError("fixed_sidechains provided but fixed_positions is missing; sidechains must be a subset of fixed_positions")
+
+        if fixed_sidechains and fixed_positions:
+            for chain, sc_list in fixed_sidechains.items():
+                if chain not in fixed_positions:
+                    raise ValueError(f"fixed_sidechains contains chain {chain} not present in fixed_positions")
+                missing = set(sc_list) - set(fixed_positions.get(chain, []))
+                if missing:
+                    raise ValueError(f"fixed_sidechains for chain {chain} contains residues not in fixed_positions: {missing}")
+
         # 1. Override sequence
+        # New behavior: override_sequence may be either:
+        #  - {chain: full_sequence_string} (legacy)
+        #  - {chain: {pos_1_indexed: 'A', pos2: ['A','C'], ...}} (per-position hard or soft overrides)
+        # For soft overrides (multiple allowed residues) we record a per-token allowed list
+        pos_restrict_map = {}
         if override_sequence:
-            for chain_id, seq_str in override_sequence.items():
-                # Identify tokens for this chain
-                chain_indices = np.where(token_chain_ids == chain_id)[0]
-                
-                if len(chain_indices) == 0:
-                     continue # Or warn
-                     
-                if len(seq_str) != len(chain_indices):
-                     raise ValueError(f"Override sequence length for chain {chain_id} is {len(seq_str)}, "
-                                      f"but structure has {len(chain_indices)} residues.")
-                
-                # Encode sequence
-                encoded_seq = const.AF3_ENCODING.encode_aa_seq(seq_str)
-                encoded_tensor = torch.tensor(encoded_seq, device=self.device)
-                one_hot = F.one_hot(encoded_tensor, num_classes=const.AF3_ENCODING.n_tokens).float()
-                
-                # Update restype
-                batch["restype"][0, chain_indices] = one_hot
+            for chain_id, spec in override_sequence.items():
+                # legacy: full-sequence string
+                if isinstance(spec, str):
+                    chain_indices = np.where(token_chain_ids == chain_id)[0]
+                    if len(chain_indices) == 0:
+                        continue
+                    if len(spec) != len(chain_indices):
+                        raise ValueError(f"Override sequence length for chain {chain_id} is {len(spec)}, "
+                                         f"but structure has {len(chain_indices)} residues.")
+
+                    encoded_seq = const.AF3_ENCODING.encode_aa_seq(spec)
+                    encoded_tensor = torch.tensor(encoded_seq, device=self.device)
+                    one_hot = F.one_hot(encoded_tensor, num_classes=const.AF3_ENCODING.n_tokens).float()
+                    batch["restype"][0, chain_indices] = one_hot
+                elif isinstance(spec, dict):
+                    # per-position overrides
+                    token_res_ids = atom_array.res_id[token_starts]
+                    for pos_str, val in spec.items():
+                        # allow numeric keys or strings that represent ints
+                        try:
+                            pos_i = int(pos_str)
+                        except Exception:
+                            # skip malformed position
+                            continue
+
+                        # find token index matching chain and residue id
+                        matches = [k for k in range(len(token_chain_ids)) if token_chain_ids[k] == chain_id and token_res_ids[k] == pos_i]
+                        if not matches:
+                            continue
+                        tok_idx = matches[0]
+
+                        # If val is a single-letter string, treat as hard override
+                        if isinstance(val, str) and len(val) == 1:
+                            encoded = const.AF3_ENCODING.encode_aa_seq(val)
+                            # encode_aa_seq returns list for single residue
+                            encoded_tensor = torch.tensor(encoded, device=self.device)
+                            one_hot = F.one_hot(encoded_tensor, num_classes=const.AF3_ENCODING.n_tokens).float()
+                            batch["restype"][0, tok_idx] = one_hot
+                        else:
+                            # soft restriction: list/iterable of allowed residues
+                            if isinstance(val, (list, tuple)):
+                                allowed = [str(v) for v in val if isinstance(v, str) and len(str(v)) == 1]
+                            else:
+                                # try comma separated string
+                                allowed = [s for s in str(val).split(":") if s]
+
+                            if allowed:
+                                pos_restrict_map[tok_idx] = allowed
 
             # Sync atom array annotations (res_name) with updated restype
             num_tokens = int(batch["token_pad_mask"][0].sum())
@@ -341,6 +415,10 @@ class Caliby:
             resnames_3letter = const.AF3_ENCODING.idx_to_token[current_tokens]
             atomwise_resnames = spread_token_wise(atom_array, resnames_3letter)
             atom_array.set_annotation("res_name", atomwise_resnames)
+
+        # attach pos_restrict_map to batch for later consumption by design()
+        if pos_restrict_map:
+            batch["pos_restrict_aatype"] = pos_restrict_map
             
         # 2. Fixed positions
         if fixed_positions:
@@ -365,6 +443,46 @@ class Caliby:
             if mask_indices:
                 # Set seq_cond_mask to 1 at these positions
                 batch["seq_cond_mask"][0, mask_indices] = 1.0
+
+        # 3. Fixed sidechains: fix atom positions for non-backbone atoms at those residues
+        if fixed_sidechains:
+            token_res_ids = atom_array.res_id[token_starts]
+
+            # build set for quick lookup
+            sc_set = set()
+            for chain, res_list in fixed_sidechains.items():
+                for res_id in res_list:
+                    sc_set.add((chain, res_id))
+
+            # identify token indices corresponding to these residues
+            num_tokens = int(batch["token_pad_mask"][0].sum())
+            token_indices_to_fix = []
+            for k in range(num_tokens):
+                chain = token_chain_ids[k]
+                res_id = token_res_ids[k]
+                if (chain, res_id) in sc_set:
+                    token_indices_to_fix.append(k)
+
+            if token_indices_to_fix:
+                atom_to_token = batch["atom_to_token_map"][0]
+                prot_bb = batch.get("prot_bb_atom_mask")
+                atom_pad = batch.get("atom_pad_mask")
+                if "atom_cond_mask" not in batch:
+                    batch["atom_cond_mask"] = torch.zeros_like(batch["atom_pad_mask"]) 
+
+                atom_indices = []
+                for ai in range(atom_to_token.shape[0]):
+                    if atom_pad is not None:
+                        if not atom_pad[0, ai]:
+                            continue
+                    tok = int(atom_to_token[ai].item())
+                    if tok in token_indices_to_fix:
+                        is_bb = bool(prot_bb[0, ai]) if prot_bb is not None else False
+                        if not is_bb:
+                            atom_indices.append(ai)
+
+                if atom_indices:
+                    batch["atom_cond_mask"][0, atom_indices] = 1.0
 
         return batch
 

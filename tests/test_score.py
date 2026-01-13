@@ -25,14 +25,14 @@ CKPT = Path("model_params/caliby/caliby.ckpt")
 
 @pytest.mark.skipif(not CKPT.exists(), reason="checkpoint missing; skip integration tests")
 def test_score_single_inmemory_matches_examples():
-    csv_path = Path("examples/outputs/score/score_outputs.csv")
+    csv_path = Path("tests/expected_outputs/score_outputs.csv")
     if not csv_path.exists():
         pytest.skip("Reference score CSV not found")
 
     df = pd.read_csv(csv_path)
     cal = Caliby(str(CKPT), seed=0, deterministic=True)
 
-    data_dir = Path("examples/example_data/native_pdbs")
+    data_dir = Path("tests/test_inputs/native_pdbs")
 
     grouped = df.groupby("example_id")
     for example_id, group in grouped:
