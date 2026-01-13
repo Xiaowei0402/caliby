@@ -14,7 +14,6 @@ from omegaconf import OmegaConf, DictConfig
 from atomworks.io.parser import parse as aw_parse
 from atomworks.io.utils import non_rcsb
 from atomworks.io.utils.io_utils import to_cif_string
-from atomworks.ml.utils.token import spread_token_wise, apply_token_wise, get_token_starts
 
 from caliby.checkpoint_utils import get_cfg_from_ckpt
 from caliby.data.data import to
@@ -22,8 +21,9 @@ from caliby.data.datasets.atomworks_sd_dataset import sd_collator
 from caliby.data.transform.preprocess import preprocess_transform
 from caliby.data.transform.sd_featurizer import sd_featurizer
 from caliby.model.seq_denoiser.lit_sd_model import LitSeqDenoiser
-import caliby.data.const as const
 
+from atomworks.ml.utils.token import spread_token_wise
+import caliby.data.const as const
 
 from caliby.eval.eval_utils import seq_des_utils as _seq_des_utils
 
@@ -212,6 +212,7 @@ class Caliby:
             pdb_content: content of the PDB/CIF file.
             num_seqs: number of sequences to generate.
             temperature: sampling temperature.
+            pos_constraint_df: optional constraints.
 
         Returns:
             List of dictionaries containing 'seq', 'pdb_string', 'scores'.
@@ -221,266 +222,99 @@ class Caliby:
         sampling_cfg.num_seqs_per_pdb = num_seqs
         sampling_cfg.temperature = temperature
         
-        # Process input
-        example = self._process_input(pdb_content)
-        
-        # Create batch 
-        batch = sd_collator([example])
-        batch = to(batch, self.device)
-        
-        # Initialize masks
-        batch = self._initialize_sampling_masks(batch)
-        
-        # Finalize constraints: format inputs into a canonical pos_constraint_df and use canonical parsers
-        sampling_inputs = OmegaConf.to_container(sampling_cfg, resolve=True)
-
-        # If user provided a pos_constraint_df (CSV-like DataFrame), normalize its index and use canonical parsers.
-        seq_des_utils = _seq_des_utils
-        if pos_constraint_df is not None:
-            # If CSV style with column 'pdb_key', normalize index.
-            if "pdb_key" in pos_constraint_df.columns:
-                # If user supplied a filtered one-row DataFrame (e.g., df[df['pdb_key']==id]),
-                # the index may be a RangeIndex; canonical parsers expect the example_id in
-                # batch["example_id"] to match the DataFrame index. For in-memory calls we
-                # remap the single-row DataFrame's index to the batch example id so parsers find it.
-                pos_constraint_df = pos_constraint_df.set_index("pdb_key")
-
-
-                # If this is a single-row DataFrame, remap its index to the batch example id
-                if pos_constraint_df.shape[0] == 1:
-                    example_id_val = batch["example_id"][0]
-                    pos_constraint_df.index = [example_id_val]
-
-            if seq_des_utils is not None:
-                batch = seq_des_utils.parse_fixed_pos_info(batch, pos_constraint_df)
-                sampling_inputs["pos_restrict_aatype"] = seq_des_utils.parse_pos_restrict_aatype_info(batch, pos_constraint_df)
-                sampling_inputs["symmetry_pos"] = seq_des_utils.parse_symmetry_pos_info(batch, pos_constraint_df)
-            else:
-                sampling_inputs.setdefault("pos_restrict_aatype", None)
-                sampling_inputs.setdefault("symmetry_pos", None)
-        else:
-
-            sampling_inputs.setdefault("pos_restrict_aatype", None)
-            sampling_inputs.setdefault("symmetry_pos", None)
+        # Prepare batch and apply constraints
+        batch = _prepare_batch(self, [pdb_content])
+        batch, sampling_inputs = _finalize_constraints(batch, sampling_cfg, pos_constraint_df)
         
         # Run sampling
         with torch.no_grad():
             id_to_atom_arrays, id_to_aux = self.model.sample(batch, sampling_inputs=sampling_inputs)
         
-        # Format output
-        results = []
-        example_id = "input_pdb"
-        if example_id in id_to_atom_arrays:
-            atom_arrays = id_to_atom_arrays[example_id]
-            aux = id_to_aux[example_id]
-            
-            for si, atom_array in enumerate(atom_arrays):
-                # Sequence
-                chain_info = non_rcsb.initialize_chain_info_from_atom_array(atom_array)
-                seq = ":".join(info["processed_entity_canonical_sequence"] for info in chain_info.values())
-                
-                # PDB String
-                pdb_str = to_cif_string(atom_array, include_nan_coords=False)
-                
-                # Scores
-                scores = aux[si] if isinstance(aux, list) else aux
-                # aux might be list of dicts or dict of lists, verifying from seq_des_utils:
-                # outputs["U"].append(aux[si]["U"]) implies aux is a list of dicts
-                
-                current_score = scores if isinstance(scores, dict) else {}
-                
-                results.append({
-                    "seq": seq,
-                    "pdb_string": pdb_str,
-                    "scores": current_score
-                })
-                
-        return results
+        return _format_design_results(id_to_atom_arrays, id_to_aux)
+
+    def design_ensemble(self,
+                        pdb_contents: list[str],
+                        num_seqs: int = 1,
+                        temperature: float = 0.1,
+                        pos_constraint_df: pd.DataFrame | None = None,
+                        use_primary_res_type: bool = True) -> list[dict[str, Any]]:
+        """
+        Design sequences for a given PDB structure ensemble using in-memory inputs.
+
+        Args:
+            pdb_contents: List of PDB/CIF strings representing the ensemble. 
+                The first string in the list is treated as the primary conformer 
+                and used as the template for output structures and residue alignment.
+            num_seqs: number of sequences to generate.
+            temperature: sampling temperature.
+            pos_constraint_df: optional constraints.
+            use_primary_res_type: use res_type from primary structure (the first string in pdb_contents).
+
+        Returns:
+            List of dictionaries containing 'seq', 'pdb_string', 'scores'.
+        """
+        # Update sampling config locally
+        sampling_cfg = self.sampling_cfg.copy()
+        sampling_cfg.num_seqs_per_pdb = num_seqs
+        sampling_cfg.temperature = temperature
+        
+        # Prepare batch
+        batch = _prepare_batch(self, pdb_contents)
+        
+        # Apply ensemble specific logic
+        ignore_mismatch = sampling_cfg.get("ensemble_ignore_res_idx_mismatch", False)
+        batch = _apply_ensemble_logic(batch, use_primary_res_type, ignore_mismatch, self.device)
+        
+        # Apply constraints
+        batch, sampling_inputs = _finalize_constraints(batch, sampling_cfg, pos_constraint_df)
+        
+        # Run sampling
+        with torch.no_grad():
+            id_to_atom_arrays, id_to_aux = self.model.sample(batch, sampling_inputs=sampling_inputs)
+        
+        return _format_design_results(id_to_atom_arrays, id_to_aux)
 
     def score(self, pdb_content: str) -> dict[str, Any]:
         """Score the sequence in the provided PDB/CIF string."""
-        example = self._process_input(pdb_content)
-        batch = sd_collator([example])
-        batch = to(batch, self.device)
-        
-        batch = self._initialize_sampling_masks(batch)
-        
-        sampling_inputs = OmegaConf.to_container(self.sampling_cfg, resolve=True)
+        # Prepare batch and apply constraints (retrieving sampling_inputs container)
+        batch = _prepare_batch(self, [pdb_content])
+        batch, sampling_inputs = _finalize_constraints(batch, self.sampling_cfg, None)
         
         with torch.no_grad():
             id_to_aux = self.model.score_samples(batch, sampling_inputs=sampling_inputs)
             
-        # Format output
-        example_id = "input_pdb"
-        if example_id in id_to_aux:
-            aux = id_to_aux[example_id]
-            
-            # Get sequence
-            chain_info = non_rcsb.initialize_chain_info_from_atom_array(aux["atom_array"])
-            seq = ":".join(info["processed_entity_canonical_sequence"] for info in chain_info.values())
-            
-            return {
-                "seq": seq,
-                "scores": aux
-            }
-        return {}
+        return _format_score_results(id_to_aux)
+
+    def score_ensemble(self, pdb_contents: list[str]) -> dict[str, Any]:
+        """
+        Score a sequence using Potts parameters computed from an ensemble of structures.
+        The sequence from the first structure is used for scoring.
+
+        Args:
+            pdb_contents: List of PDB/CIF strings representing the ensemble.
+                The first string in the list is treated as the primary conformer
+                and used to provide the sequence for scoring.
+
+        Returns:
+            Dictionary containing 'seq' and 'scores'.
+        """
+        # Prepare batch
+        batch = _prepare_batch(self, pdb_contents)
+
+        # Apply ensemble specific logic
+        ignore_mismatch = self.sampling_cfg.get("ensemble_ignore_res_idx_mismatch", False)
+        # Use primary res types since we are scoring the sequence from the primary structure
+        batch = _apply_ensemble_logic(batch, use_primary_res_type=True, ignore_mismatch=ignore_mismatch, device=self.device)
+
+        # Finalize inputs
+        batch, sampling_inputs = _finalize_constraints(batch, self.sampling_cfg, None)
+
+        with torch.no_grad():
+            id_to_aux = self.model.score_samples(batch, sampling_inputs=sampling_inputs)
+
+        return _format_score_results(id_to_aux)
 
     
-    # def _apply_constraints(self, batch, fixed_positions: dict[str, list[int]] = None, fixed_sidechains: dict[str, list[int]] = None, override_sequence: dict[str, str] = None):
-    #     """
-    #     Apply fixed positions and override sequence constraints to the batch.
-    #     """
-    #     # Assuming batch specific for one example duplicated or single
-    #     # Here we only handle the single example case effectively (B=1)
-        
-    #     # Get atom array (assuming single example)
-    #     atom_array = batch["atom_array"][0] # This is a reference, modifying it affects batch if linked
-        
-    #     # Get token mapping
-    #     token_starts = get_token_starts(atom_array)
-    #     token_chain_ids = atom_array.chain_id[token_starts]
-
-    #     # Validate fixed_sidechains is subset of fixed_positions if both provided
-    #     if fixed_sidechains and not fixed_positions:
-    #         raise ValueError("fixed_sidechains provided but fixed_positions is missing; sidechains must be a subset of fixed_positions")
-
-    #     if fixed_sidechains and fixed_positions:
-    #         for chain, sc_list in fixed_sidechains.items():
-    #             if chain not in fixed_positions:
-    #                 raise ValueError(f"fixed_sidechains contains chain {chain} not present in fixed_positions")
-    #             missing = set(sc_list) - set(fixed_positions.get(chain, []))
-    #             if missing:
-    #                 raise ValueError(f"fixed_sidechains for chain {chain} contains residues not in fixed_positions: {missing}")
-
-    #     # 1. Override sequence and positional restrictions
-    #     # Use canonical parsers from seq_des_utils when possible to ensure identical semantics.
-    #     override_entries = []
-    #     restrict_entries = []
-
-    #     # Normalize incoming override_sequence which may be provided as per-chain dicts or legacy full-sequence strings
-    #     if override_sequence:
-    #         for chain_id, spec in override_sequence.items():
-    #             # legacy full-sequence string for a chain
-    #             if isinstance(spec, str) and not isinstance(spec, dict):
-    #                 # treat as full-sequence override for this chain (legacy behavior)
-    #                 chain_indices = np.where(token_chain_ids == chain_id)[0]
-    #                 if len(chain_indices) == 0:
-    #                     continue
-    #                 if len(spec) != len(chain_indices):
-    #                     raise ValueError(f"Override sequence length for chain {chain_id} is {len(spec)}, "
-    #                                      f"but structure has {len(chain_indices)} residues.")
-
-    #                 encoded_seq = const.AF3_ENCODING.encode_aa_seq(spec)
-    #                 encoded_tensor = torch.tensor(encoded_seq, device=self.device)
-    #                 one_hot = F.one_hot(encoded_tensor, num_classes=const.AF3_ENCODING.n_tokens).float()
-    #                 batch["restype"][0, chain_indices] = one_hot
-    #             elif isinstance(spec, dict):
-    #                 # per-position specs: convert to canonical strings
-    #                 for pos_key, val in spec.items():
-    #                     try:
-    #                         pos_i = int(pos_key)
-    #                     except Exception:
-    #                         continue
-
-    #                     if isinstance(val, str) and len(val) == 1:
-    #                         override_entries.append(f"{chain_id}{pos_i}:{val}")
-    #                     else:
-    #                         # treat as soft restriction (allowed aatypes)
-    #                         if isinstance(val, (list, tuple)):
-    #                             letters = "".join([str(v) for v in val])
-    #                         else:
-    #                             letters = str(val)
-    #                         restrict_entries.append(f"{chain_id}{pos_i}:{letters}")
-
-    #     # Note: any positional restrictions passed via the design() call are merged into
-    #     # `override_sequence` by the caller; they will be present in `restrict_entries` above.
-
-    #     # Use module-level canonical parsers (imported at module load time)
-    #     seq_des_utils = _seq_des_utils
-
-    #     # If canonical utilities are available, construct a small DataFrame for this single-example batch
-    #     # and let the canonical parsers populate batch masks and restype exactly as the file-backed pipeline.
-    #     if seq_des_utils is not None and (override_entries or restrict_entries):
-    #         example_id = batch["example_id"][0]
-    #         row = {}
-    #         row["fixed_pos_override_seq"] = ",".join(override_entries) if override_entries else np.nan
-    #         row["pos_restrict_aatype"] = ",".join(restrict_entries) if restrict_entries else np.nan
-
-    #         pos_df = pd.DataFrame([row], index=[example_id])
-
-    #         # Let canonical parser update seq_cond_mask, atom_cond_mask, and restype overrides
-    #         batch = seq_des_utils.parse_fixed_pos_info(batch, pos_df)
-
-    #         # Let canonical parser produce pos_restrict_aatype masks
-    #         pr = seq_des_utils.parse_pos_restrict_aatype_info(batch, pos_df)
-    #         if pr is not None:
-    #             batch["pos_restrict_aatype"] = pr
-            
-    #     # 2. Fixed positions
-    #     if fixed_positions:
-    #         token_res_ids = atom_array.res_id[token_starts]
-            
-    #         # Create set of fixed (chain, res_id) tuples for O(1) lookup
-    #         fixed_set = set()
-    #         for chain, res_list in fixed_positions.items():
-    #             for res_id in res_list:
-    #                 fixed_set.add((chain, res_id))
-            
-    #         # Identify which tokens are fixed
-    #         num_tokens = int(batch["token_pad_mask"][0].sum())
-    #         mask_indices = []
-            
-    #         for k in range(num_tokens):
-    #             chain = token_chain_ids[k]
-    #             res_id = token_res_ids[k]
-    #             if (chain, res_id) in fixed_set:
-    #                 mask_indices.append(k)
-            
-    #         if mask_indices:
-    #             # Set seq_cond_mask to 1 at these positions
-    #             batch["seq_cond_mask"][0, mask_indices] = 1.0
-
-    #     # 3. Fixed sidechains: fix atom positions for non-backbone atoms at those residues
-    #     if fixed_sidechains:
-    #         token_res_ids = atom_array.res_id[token_starts]
-
-    #         # build set for quick lookup
-    #         sc_set = set()
-    #         for chain, res_list in fixed_sidechains.items():
-    #             for res_id in res_list:
-    #                 sc_set.add((chain, res_id))
-
-    #         # identify token indices corresponding to these residues
-    #         num_tokens = int(batch["token_pad_mask"][0].sum())
-    #         token_indices_to_fix = []
-    #         for k in range(num_tokens):
-    #             chain = token_chain_ids[k]
-    #             res_id = token_res_ids[k]
-    #             if (chain, res_id) in sc_set:
-    #                 token_indices_to_fix.append(k)
-
-    #         if token_indices_to_fix:
-    #             atom_to_token = batch["atom_to_token_map"][0]
-    #             prot_bb = batch.get("prot_bb_atom_mask")
-    #             atom_pad = batch.get("atom_pad_mask")
-    #             if "atom_cond_mask" not in batch:
-    #                 batch["atom_cond_mask"] = torch.zeros_like(batch["atom_pad_mask"]) 
-
-    #             atom_indices = []
-    #             for ai in range(atom_to_token.shape[0]):
-    #                 if atom_pad is not None:
-    #                     if not atom_pad[0, ai]:
-    #                         continue
-    #                 tok = int(atom_to_token[ai].item())
-    #                 if tok in token_indices_to_fix:
-    #                     is_bb = bool(prot_bb[0, ai]) if prot_bb is not None else False
-    #                     if not is_bb:
-    #                         atom_indices.append(ai)
-
-    #             if atom_indices:
-    #                 batch["atom_cond_mask"][0, atom_indices] = 1.0
-
-    #     return batch
 
     def _initialize_sampling_masks(self, batch: dict[str, Any]) -> dict[str, torch.Tensor]:
         """Delegate sampling mask initialization to shared utility."""
@@ -503,3 +337,114 @@ class Caliby:
             )
 
             return batch
+
+
+def _prepare_batch(caliby, pdb_contents: list[str], example_id: str = "input_pdb"):
+    """
+    Common logic to process PDB contents into a featurized batch.
+    """
+    examples = [caliby._process_input(content, example_id=example_id) for content in pdb_contents]
+    batch = sd_collator(examples)
+    batch = to(batch, caliby.device)
+    batch = caliby._initialize_sampling_masks(batch)
+    return batch
+
+
+def _apply_ensemble_logic(batch, use_primary_res_type, ignore_mismatch, device):
+    """
+    Logic for ensemble inputs: tie samples and align residue types if needed.
+    """
+    # Tie all samples together
+    batch["tied_sampling_ids"] = torch.zeros(len(batch["example_id"]), device=device, dtype=torch.long)
+
+    # Use res_type from primary structure (the first in the ensemble)
+    if use_primary_res_type:
+        # We use repeat instead of expand to allow independent (though usually identical) 
+        # modifications during the constraint application phase.
+        repeat_dims = [len(batch["example_id"])] + [1] * (batch["restype"].ndim - 1)
+        batch["restype"] = batch["restype"][0:1].repeat(*repeat_dims)
+        
+        # Update atom array names for all other conformers
+        for i in range(1, len(batch["atom_array"])):
+            atomwise_resnames = spread_token_wise(
+                batch["atom_array"][i],
+                const.AF3_ENCODING.idx_to_token[batch["restype"][0].argmax(dim=-1).cpu().numpy()],
+            )
+            batch["atom_array"][i].set_annotation("res_name", atomwise_resnames)
+
+    # Validate alignment
+    if not ignore_mismatch:
+        if not (batch["residue_index"] == batch["residue_index"][0]).all().item():
+            raise ValueError("Residue index mismatch between decoys.")
+        if not (batch["asym_id"] == batch["asym_id"][0]).all().item():
+            raise ValueError("Chain ID mismatch between decoys.")
+    return batch
+
+
+def _finalize_constraints(batch, sampling_cfg, pos_constraint_df):
+    """
+    Common logic to parse and apply constraints into sampling_inputs.
+    """
+    sampling_inputs = OmegaConf.to_container(sampling_cfg, resolve=True)
+
+    if pos_constraint_df is not None:
+        # Normalize index if pdb_key is provided
+        if "pdb_key" in pos_constraint_df.columns:
+            pos_constraint_df = pos_constraint_df.set_index("pdb_key")
+            # For singe-target in-memory designed to map the provided row to input batch
+            if pos_constraint_df.shape[0] == 1:
+                example_id_val = batch["example_id"][0]
+                pos_constraint_df.index = [example_id_val]
+
+        if _seq_des_utils is not None:
+            batch = _seq_des_utils.parse_fixed_pos_info(batch, pos_constraint_df)
+            sampling_inputs["pos_restrict_aatype"] = _seq_des_utils.parse_pos_restrict_aatype_info(
+                batch, pos_constraint_df
+            )
+            sampling_inputs["symmetry_pos"] = _seq_des_utils.parse_symmetry_pos_info(batch, pos_constraint_df)
+
+    # Ensure optional keys are present
+    sampling_inputs.setdefault("pos_restrict_aatype", None)
+    sampling_inputs.setdefault("symmetry_pos", None)
+
+    return batch, sampling_inputs
+
+
+def _format_design_results(id_to_atom_arrays, id_to_aux, example_id="input_pdb"):
+    """
+    Helper to format design results into standard list of dicts.
+    """
+    results = []
+    if example_id in id_to_atom_arrays:
+        atom_arrays = id_to_atom_arrays[example_id]
+        aux = id_to_aux[example_id]
+
+        for si, atom_array in enumerate(atom_arrays):
+            # Sequence
+            chain_info = non_rcsb.initialize_chain_info_from_atom_array(atom_array)
+            seq = ":".join(info["processed_entity_canonical_sequence"] for info in chain_info.values())
+
+            # PDB String
+            pdb_str = to_cif_string(atom_array, include_nan_coords=False)
+
+            # Scores
+            scores = aux[si] if isinstance(aux, list) else aux
+            current_score = scores if isinstance(scores, dict) else {}
+
+            results.append({"seq": seq, "pdb_string": pdb_str, "scores": current_score})
+    return results
+
+
+def _format_score_results(id_to_aux, example_id="input_pdb"):
+    """
+    Helper to format score results into standard dict.
+    """
+    if example_id in id_to_aux:
+        aux = id_to_aux[example_id]
+
+        # Get sequence
+        chain_info = non_rcsb.initialize_chain_info_from_atom_array(aux["atom_array"])
+        seq = ":".join(info["processed_entity_canonical_sequence"] for info in chain_info.values())
+
+        return {"seq": seq, "scores": aux}
+    return {}

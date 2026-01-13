@@ -8,15 +8,9 @@ try:
 except Exception:
     pytest.skip("torch missing; skip integration tests", allow_module_level=True)
 
-from caliby.data.datasets.atomworks_sd_dataset import sd_collator
-from caliby.data.data import to
-from atomworks.ml.utils.token import get_token_starts
-from caliby import data as _data  # to access helpers if needed
-import caliby.data.const as _const
-
-
 import importlib.util
 import sys
+
 repo_root = Path(__file__).resolve().parents[1]
 caliby_file = repo_root / "Caliby.py"
 if not caliby_file.exists():
@@ -144,7 +138,7 @@ def test_design_with_pos_constraints():
 
 
 @pytest.mark.skipif(not CKPT.exists(), reason="checkpoint missing; skip integration tests")
-def test_design_override_seq_positions_7xz3():
+def test_design_override():
     """Test that per-position override (7xz3) forces residues 36-40 to 'C'."""
     constr_path = Path("tests/test_inputs/native_pdb_constraints.csv")
     if not constr_path.exists():
@@ -173,67 +167,8 @@ def test_design_override_seq_positions_7xz3():
 
     got_seqs = [r.get("seq", "") for r in results]
 
-    for seq in got_seqs:
-        assert seq[35:40] == "CCCCC", f"Override failed, got residues 36-40 as {seq[35:40]} instead of CCCCC"
+    for i, seq in enumerate(got_seqs):
+        # Sequence generated will skip missing residues, so the actual position for 36-40 on pdb is 17-21 in seq
+        assert seq[16:21] == "CCCCC", f"{i}, Override failed, got residues 36-40 as {seq[16:21]} instead of CCCCC"
 
 
-
-#################
-# Util functions#
-#################
-
-def parse_fixed_pos_seq(raw_fixed):
-    """Parse strings like "A6-15,A20" into {'A': [6,7,...], ...}.
-
-    Handles NaN/empty gracefully.
-    """
-    fixed_positions = {}
-    if isinstance(raw_fixed, float) and np.isnan(raw_fixed):
-        return fixed_positions
-
-    raw = str(raw_fixed).strip()
-    if not raw:
-        return fixed_positions
-
-    parts = [p.strip() for p in raw.split(",") if p.strip()]
-    for part in parts:
-        if len(part) < 2:
-            continue
-        chain = part[0]
-        rest = part[1:]
-        if "-" in rest:
-            a, b = rest.split("-", 1)
-            try:
-                a_i = int(a)
-                b_i = int(b)
-            except Exception:
-                continue
-            rng = list(range(a_i, b_i + 1))
-        else:
-            try:
-                rng = [int(rest)]
-            except Exception:
-                continue
-        fixed_positions.setdefault(chain, []).extend(rng)
-
-    return fixed_positions
-
-def parse_override_seq(raw):
-        out = {}
-        if isinstance(raw, float) and np.isnan(raw):
-            return out
-        raw_s = str(raw).strip()
-        if not raw_s:
-            return out
-        parts = [p.strip() for p in raw_s.split(",") if p.strip()]
-        for part in parts:
-            if ":" not in part or len(part) < 3:
-                continue
-            left, right = part.split(":", 1)
-            chain = left[0]
-            try:
-                pos = int(left[1:])
-            except Exception:
-                continue
-            out.setdefault(chain, {})[pos] = right.strip()
-        return out
