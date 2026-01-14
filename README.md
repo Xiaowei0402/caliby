@@ -73,7 +73,11 @@ with open("examples/example_data/native_pdbs/7xz3.cif", "r") as f:
 results = model.design(pdb_content, num_seqs=2, temperature=0.1)
 print(f"Designed sequence: {results[0]['seq']}")
 
-# 2. Design with Constraints
+# 2. Design with Omitted Amino Acids
+# Omit Cysteine ("C") and Histidine ("H")
+results_omit = model.design(pdb_content, omit_aas="CH")
+
+# 3. Design with Constraints
 # resid: index in label_seq_id
 constraints = pd.DataFrame([{
     "fixed_pos_seq": "A1-10", 

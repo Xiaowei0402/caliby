@@ -315,7 +315,8 @@ class Caliby:
                pdb_content: str,
                num_seqs: int = 1,
                temperature: float = 0.1,
-               pos_constraint_df: pd.DataFrame | None = None) -> list[dict[str, Any]]:
+               pos_constraint_df: pd.DataFrame | None = None,
+               omit_aas: str | None = None) -> list[dict[str, Any]]:
         """
         Design sequences for a given PDB structure.
 
@@ -324,6 +325,7 @@ class Caliby:
             num_seqs: number of sequences to generate.
             temperature: sampling temperature.
             pos_constraint_df: optional constraints.
+            omit_aas: AAS to omit during sampling (e.g., "C" to omit Cysteine).
 
         Returns:
             List of dictionaries containing 'seq', 'pdb_string', 'scores'.
@@ -332,6 +334,8 @@ class Caliby:
         sampling_cfg = self.sampling_cfg.copy()
         sampling_cfg.num_seqs_per_pdb = num_seqs
         sampling_cfg.temperature = temperature
+        if omit_aas is not None:
+            sampling_cfg.omit_aas = list(omit_aas)
         
         # Prepare batch and apply constraints
         batch = _prepare_batch(self, [pdb_content])
@@ -348,7 +352,8 @@ class Caliby:
                         num_seqs: int = 1,
                         temperature: float = 0.1,
                         pos_constraint_df: pd.DataFrame | None = None,
-                        use_primary_res_type: bool = True) -> list[dict[str, Any]]:
+                        use_primary_res_type: bool = True,
+                        omit_aas: str | None = None) -> list[dict[str, Any]]:
         """
         Design sequences for a given PDB structure ensemble using in-memory inputs.
 
@@ -360,6 +365,7 @@ class Caliby:
             temperature: sampling temperature.
             pos_constraint_df: optional constraints.
             use_primary_res_type: use res_type from primary structure (the first string in pdb_contents).
+            omit_aas: AAS to omit during sampling (e.g., "C" to omit Cysteine).
 
         Returns:
             List of dictionaries containing 'seq', 'pdb_string', 'scores'.
@@ -368,6 +374,8 @@ class Caliby:
         sampling_cfg = self.sampling_cfg.copy()
         sampling_cfg.num_seqs_per_pdb = num_seqs
         sampling_cfg.temperature = temperature
+        if omit_aas is not None:
+            sampling_cfg.omit_aas = list(omit_aas)
         
         # Prepare batch
         batch = _prepare_batch(self, pdb_contents)
