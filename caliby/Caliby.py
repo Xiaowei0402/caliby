@@ -5,6 +5,7 @@ import urllib.request
 import contextlib
 import warnings
 import logging
+import gc
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Optional, Union, List, Dict
@@ -221,6 +222,12 @@ class Caliby:
         else:
             yield
 
+    def _cleanup(self):
+        """Clear GPU cache and collect garbage to free up memory."""
+        if torch.cuda.is_available():
+            torch.cuda.empty_cache()
+        gc.collect()
+
     def _load_model(self, ckpt_path: str, overrides: dict = None):
         """Load model, data config, and sampling config from checkpoint."""
         # Load model using map_location to ensure it goes to the right device directly or CPU first
@@ -383,16 +390,19 @@ class Caliby:
         if omit_aas is not None:
             sampling_cfg.omit_aas = list(omit_aas)
         
-        # Prepare batch and apply constraints
-        batch = _prepare_batch(self, [pdb_content])
-        batch, sampling_inputs = _finalize_constraints(batch, sampling_cfg, pos_constraint_df)
-        
-        # Run sampling
-        with self._silence_tqdm(verbose):
-            with torch.no_grad():
-                id_to_atom_arrays, id_to_aux = self.model.sample(batch, sampling_inputs=sampling_inputs)
-        
-        return _format_design_results(id_to_atom_arrays, id_to_aux)
+        try:
+            # Prepare batch and apply constraints
+            batch = _prepare_batch(self, [pdb_content])
+            batch, sampling_inputs = _finalize_constraints(batch, sampling_cfg, pos_constraint_df)
+            
+            # Run sampling
+            with self._silence_tqdm(verbose):
+                with torch.no_grad():
+                    id_to_atom_arrays, id_to_aux = self.model.sample(batch, sampling_inputs=sampling_inputs)
+            
+            return _format_design_results(id_to_atom_arrays, id_to_aux)
+        finally:
+            self._cleanup()
 
     def design_ensemble(self,
                         pdb_contents: list[str],
@@ -434,22 +444,25 @@ class Caliby:
         if omit_aas is not None:
             sampling_cfg.omit_aas = list(omit_aas)
         
-        # Prepare batch
-        batch = _prepare_batch(self, pdb_contents)
-        
-        # Apply ensemble specific logic
-        ignore_mismatch = sampling_cfg.get("ensemble_ignore_res_idx_mismatch", False)
-        batch = _apply_ensemble_logic(batch, use_primary_res_type, ignore_mismatch, self.device)
-        
-        # Apply constraints
-        batch, sampling_inputs = _finalize_constraints(batch, sampling_cfg, pos_constraint_df)
-        
-        # Run sampling
-        with self._silence_tqdm(verbose):
-            with torch.no_grad():
-                id_to_atom_arrays, id_to_aux = self.model.sample(batch, sampling_inputs=sampling_inputs)
-        
-        return _format_design_results(id_to_atom_arrays, id_to_aux)
+        try:
+            # Prepare batch
+            batch = _prepare_batch(self, pdb_contents)
+            
+            # Apply ensemble specific logic
+            ignore_mismatch = sampling_cfg.get("ensemble_ignore_res_idx_mismatch", False)
+            batch = _apply_ensemble_logic(batch, use_primary_res_type, ignore_mismatch, self.device)
+            
+            # Apply constraints
+            batch, sampling_inputs = _finalize_constraints(batch, sampling_cfg, pos_constraint_df)
+            
+            # Run sampling
+            with self._silence_tqdm(verbose):
+                with torch.no_grad():
+                    id_to_atom_arrays, id_to_aux = self.model.sample(batch, sampling_inputs=sampling_inputs)
+            
+            return _format_design_results(id_to_atom_arrays, id_to_aux)
+        finally:
+            self._cleanup()
 
     def score(self, pdb_content: str, verbose: Optional[bool] = None) -> dict[str, Any]:
         """Score the sequence in the provided PDB/CIF string."""
@@ -460,15 +473,18 @@ class Caliby:
         sampling_cfg = self.sampling_cfg.copy()
         sampling_cfg.verbose = verbose
 
-        # Prepare batch and apply constraints (retrieving sampling_inputs container)
-        batch = _prepare_batch(self, [pdb_content])
-        batch, sampling_inputs = _finalize_constraints(batch, sampling_cfg, None)
-        
-        with self._silence_tqdm(verbose):
-            with torch.no_grad():
-                id_to_aux = self.model.score_samples(batch, sampling_inputs=sampling_inputs)
+        try:
+            # Prepare batch and apply constraints (retrieving sampling_inputs container)
+            batch = _prepare_batch(self, [pdb_content])
+            batch, sampling_inputs = _finalize_constraints(batch, sampling_cfg, None)
             
-        return _format_score_results(id_to_aux)
+            with self._silence_tqdm(verbose):
+                with torch.no_grad():
+                    id_to_aux = self.model.score_samples(batch, sampling_inputs=sampling_inputs)
+                
+            return _format_score_results(id_to_aux)
+        finally:
+            self._cleanup()
 
     def score_ensemble(self, pdb_contents: list[str], verbose: Optional[bool] = None) -> dict[str, Any]:
         """
@@ -491,22 +507,25 @@ class Caliby:
         sampling_cfg = self.sampling_cfg.copy()
         sampling_cfg.verbose = verbose
 
-        # Prepare batch
-        batch = _prepare_batch(self, pdb_contents)
+        try:
+            # Prepare batch
+            batch = _prepare_batch(self, pdb_contents)
 
-        # Apply ensemble specific logic
-        ignore_mismatch = sampling_cfg.get("ensemble_ignore_res_idx_mismatch", False)
-        # Use primary res types since we are scoring the sequence from the primary structure
-        batch = _apply_ensemble_logic(batch, use_primary_res_type=True, ignore_mismatch=ignore_mismatch, device=self.device)
+            # Apply ensemble specific logic
+            ignore_mismatch = sampling_cfg.get("ensemble_ignore_res_idx_mismatch", False)
+            # Use primary res types since we are scoring the sequence from the primary structure
+            batch = _apply_ensemble_logic(batch, use_primary_res_type=True, ignore_mismatch=ignore_mismatch, device=self.device)
 
-        # Finalize inputs
-        batch, sampling_inputs = _finalize_constraints(batch, sampling_cfg, None)
+            # Finalize inputs
+            batch, sampling_inputs = _finalize_constraints(batch, sampling_cfg, None)
 
-        with self._silence_tqdm(verbose):
-            with torch.no_grad():
-                id_to_aux = self.model.score_samples(batch, sampling_inputs=sampling_inputs)
+            with self._silence_tqdm(verbose):
+                with torch.no_grad():
+                    id_to_aux = self.model.score_samples(batch, sampling_inputs=sampling_inputs)
 
-        return _format_score_results(id_to_aux)
+            return _format_score_results(id_to_aux)
+        finally:
+            self._cleanup()
 
     
 
