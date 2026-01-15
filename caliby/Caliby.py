@@ -213,10 +213,12 @@ class Caliby:
             # Fallback with essential defaults
             sampling_cfg = OmegaConf.create({
                 "num_seqs_per_pdb": 1,
-                "temperature": 0.1,
                 "batch_size": 1,
                 "num_workers": 0,
                 "verbose": False,
+                "potts_sampling_cfg": {
+                    "potts_temperature": 0.01,
+                },
                 # These are often used in sampling masks
                 "ensemble_ignore_res_idx_mismatch": False,
                 "omit_aas": None, 
@@ -314,7 +316,7 @@ class Caliby:
     def design(self,
                pdb_content: str,
                num_seqs: int = 1,
-               temperature: float = 0.1,
+               temperature: float = 0.01,
                pos_constraint_df: pd.DataFrame | None = None,
                omit_aas: str | None = None) -> list[dict[str, Any]]:
         """
@@ -333,7 +335,11 @@ class Caliby:
         # Update sampling config locally
         sampling_cfg = self.sampling_cfg.copy()
         sampling_cfg.num_seqs_per_pdb = num_seqs
-        sampling_cfg.temperature = temperature
+        
+        if "potts_sampling_cfg" not in sampling_cfg:
+            sampling_cfg.potts_sampling_cfg = {}
+        sampling_cfg.potts_sampling_cfg.potts_temperature = temperature
+        
         if omit_aas is not None:
             sampling_cfg.omit_aas = list(omit_aas)
         
@@ -350,7 +356,7 @@ class Caliby:
     def design_ensemble(self,
                         pdb_contents: list[str],
                         num_seqs: int = 1,
-                        temperature: float = 0.1,
+                        temperature: float = 0.01,
                         pos_constraint_df: pd.DataFrame | None = None,
                         use_primary_res_type: bool = True,
                         omit_aas: str | None = None) -> list[dict[str, Any]]:
@@ -373,7 +379,11 @@ class Caliby:
         # Update sampling config locally
         sampling_cfg = self.sampling_cfg.copy()
         sampling_cfg.num_seqs_per_pdb = num_seqs
-        sampling_cfg.temperature = temperature
+        
+        if "potts_sampling_cfg" not in sampling_cfg:
+            sampling_cfg.potts_sampling_cfg = {}
+        sampling_cfg.potts_sampling_cfg.potts_temperature = temperature
+
         if omit_aas is not None:
             sampling_cfg.omit_aas = list(omit_aas)
         

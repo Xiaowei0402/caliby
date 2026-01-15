@@ -70,6 +70,7 @@ with open("examples/example_data/native_pdbs/7xz3.cif", "r") as f:
     pdb_content = f.read()
 
 # 1. Basic Design
+# Default temperature is 0.01. Increase above 0.1 to improve sequence diversity.
 results = model.design(pdb_content, num_seqs=2, temperature=0.1)
 print(f"Designed sequence: {results[0]['seq']}")
 
@@ -95,6 +96,12 @@ results_ensemble = model.design_ensemble(ensemble, num_seqs=2)
 score_info = model.score(pdb_content)
 print(f"Energy (U): {score_info['scores']['U']}")
 ```
+
+## Additional Features
+
+### Sampling Temperature
+The `temperature` parameter in `design()` and `design_ensemble()` controls the potts sampling temperature:
+- Default temperature is 0.01, might get very similar sequences. If higher sequence diversity is needed, need to increase temperature above 0.1.
 
 ### Position-wise Constraints (pos_constraint_df)
 
