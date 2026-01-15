@@ -3,6 +3,8 @@ import os
 import tarfile
 import urllib.request
 import contextlib
+import warnings
+import logging
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Optional, Union, List, Dict
@@ -103,7 +105,14 @@ class Caliby:
         self.checkpoint_path = checkpoint_path
         self.device = device if device else ("cuda" if torch.cuda.is_available() else "cpu")
         self.verbose = verbose
-        
+
+        # Suppress warnings and chatty logs if not verbose
+        if not self.verbose:
+            warnings.filterwarnings("ignore")
+            logging.getLogger("lightning").setLevel(logging.ERROR)
+            logging.getLogger("pytorch_lightning").setLevel(logging.ERROR)
+            logging.getLogger("hydra").setLevel(logging.ERROR)
+
         # Set global RNG seed if provided
         if seed is not None:
             self.set_seed(seed, deterministic=deterministic)
