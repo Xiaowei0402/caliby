@@ -2,6 +2,7 @@ import io
 import os
 import tarfile
 import urllib.request
+import contextlib
 from collections import defaultdict
 from pathlib import Path
 from typing import Any, Optional, Union, List, Dict
@@ -12,6 +13,7 @@ import hydra
 import pandas as pd
 import numpy as np
 import random
+import tqdm.std
 from omegaconf import OmegaConf, DictConfig
 
 from atomworks.io.parser import parse as aw_parse
@@ -45,7 +47,8 @@ class Caliby:
         device: str = None,
         sampling_overrides: dict = None,
         seed: Optional[int] = None,
-        deterministic: bool = True
+        deterministic: bool = True,
+        verbose: bool = False
     ):
         """
         Initialize the Caliby model.
@@ -57,6 +60,7 @@ class Caliby:
             sampling_overrides: Dictionary of overrides for sampling configuration.
             seed: Optional random seed for reproducibility.
             deterministic: Whether to use deterministic behavior (slower).
+            verbose: Whether to show progress bars and logging during sampling.
         """
         # Determine base directory of the caliby package
         base_dir = Path(__file__).resolve().parent
@@ -98,6 +102,7 @@ class Caliby:
 
         self.checkpoint_path = checkpoint_path
         self.device = device if device else ("cuda" if torch.cuda.is_available() else "cpu")
+        self.verbose = verbose
         
         # Set global RNG seed if provided
         if seed is not None:
@@ -105,6 +110,11 @@ class Caliby:
 
         # Load model and configs
         self.model, self.data_cfg, self.sampling_cfg = self._load_model(checkpoint_path, sampling_overrides)
+        
+        # Sync verbose flag if it was and still is set in sampling_cfg
+        if "verbose" in self.sampling_cfg:
+            self.sampling_cfg.verbose = self.verbose
+
         self.model.eval()
         self.model.to(self.device)
 
@@ -186,6 +196,21 @@ class Caliby:
         # Record
         self.seed = seed
         self.deterministic = bool(deterministic)
+
+    @contextlib.contextmanager
+    def _silence_tqdm(self, verbose: bool):
+        if not verbose:
+            orig_init = tqdm.std.tqdm.__init__
+            def new_init(instance, *args, **kwargs):
+                kwargs['disable'] = True
+                orig_init(instance, *args, **kwargs)
+            tqdm.std.tqdm.__init__ = new_init
+            try:
+                yield
+            finally:
+                tqdm.std.tqdm.__init__ = orig_init
+        else:
+            yield
 
     def _load_model(self, ckpt_path: str, overrides: dict = None):
         """Load model, data config, and sampling config from checkpoint."""
@@ -318,7 +343,8 @@ class Caliby:
                num_seqs: int = 1,
                temperature: float = 0.01,
                pos_constraint_df: pd.DataFrame | None = None,
-               omit_aas: str | None = None) -> list[dict[str, Any]]:
+               omit_aas: str | None = None,
+               verbose: Optional[bool] = None) -> list[dict[str, Any]]:
         """
         Design sequences for a given PDB structure.
 
@@ -328,13 +354,18 @@ class Caliby:
             temperature: sampling temperature.
             pos_constraint_df: optional constraints.
             omit_aas: AAS to omit during sampling (e.g., "C" to omit Cysteine).
+            verbose: whether to show progress bars. Defaults to self.verbose.
 
         Returns:
             List of dictionaries containing 'seq', 'pdb_string', 'scores'.
         """
+        if verbose is None:
+            verbose = self.verbose
+            
         # Update sampling config locally
         sampling_cfg = self.sampling_cfg.copy()
         sampling_cfg.num_seqs_per_pdb = num_seqs
+        sampling_cfg.verbose = verbose
         
         if "potts_sampling_cfg" not in sampling_cfg:
             sampling_cfg.potts_sampling_cfg = {}
@@ -348,8 +379,9 @@ class Caliby:
         batch, sampling_inputs = _finalize_constraints(batch, sampling_cfg, pos_constraint_df)
         
         # Run sampling
-        with torch.no_grad():
-            id_to_atom_arrays, id_to_aux = self.model.sample(batch, sampling_inputs=sampling_inputs)
+        with self._silence_tqdm(verbose):
+            with torch.no_grad():
+                id_to_atom_arrays, id_to_aux = self.model.sample(batch, sampling_inputs=sampling_inputs)
         
         return _format_design_results(id_to_atom_arrays, id_to_aux)
 
@@ -359,7 +391,8 @@ class Caliby:
                         temperature: float = 0.01,
                         pos_constraint_df: pd.DataFrame | None = None,
                         use_primary_res_type: bool = True,
-                        omit_aas: str | None = None) -> list[dict[str, Any]]:
+                        omit_aas: str | None = None,
+                        verbose: Optional[bool] = None) -> list[dict[str, Any]]:
         """
         Design sequences for a given PDB structure ensemble using in-memory inputs.
 
@@ -372,13 +405,18 @@ class Caliby:
             pos_constraint_df: optional constraints.
             use_primary_res_type: use res_type from primary structure (the first string in pdb_contents).
             omit_aas: AAS to omit during sampling (e.g., "C" to omit Cysteine).
+            verbose: whether to show progress bars. Defaults to self.verbose.
 
         Returns:
             List of dictionaries containing 'seq', 'pdb_string', 'scores'.
         """
+        if verbose is None:
+            verbose = self.verbose
+
         # Update sampling config locally
         sampling_cfg = self.sampling_cfg.copy()
         sampling_cfg.num_seqs_per_pdb = num_seqs
+        sampling_cfg.verbose = verbose
         
         if "potts_sampling_cfg" not in sampling_cfg:
             sampling_cfg.potts_sampling_cfg = {}
@@ -398,23 +436,32 @@ class Caliby:
         batch, sampling_inputs = _finalize_constraints(batch, sampling_cfg, pos_constraint_df)
         
         # Run sampling
-        with torch.no_grad():
-            id_to_atom_arrays, id_to_aux = self.model.sample(batch, sampling_inputs=sampling_inputs)
+        with self._silence_tqdm(verbose):
+            with torch.no_grad():
+                id_to_atom_arrays, id_to_aux = self.model.sample(batch, sampling_inputs=sampling_inputs)
         
         return _format_design_results(id_to_atom_arrays, id_to_aux)
 
-    def score(self, pdb_content: str) -> dict[str, Any]:
+    def score(self, pdb_content: str, verbose: Optional[bool] = None) -> dict[str, Any]:
         """Score the sequence in the provided PDB/CIF string."""
+        if verbose is None:
+            verbose = self.verbose
+        
+        # Update sampling config locally
+        sampling_cfg = self.sampling_cfg.copy()
+        sampling_cfg.verbose = verbose
+
         # Prepare batch and apply constraints (retrieving sampling_inputs container)
         batch = _prepare_batch(self, [pdb_content])
-        batch, sampling_inputs = _finalize_constraints(batch, self.sampling_cfg, None)
+        batch, sampling_inputs = _finalize_constraints(batch, sampling_cfg, None)
         
-        with torch.no_grad():
-            id_to_aux = self.model.score_samples(batch, sampling_inputs=sampling_inputs)
+        with self._silence_tqdm(verbose):
+            with torch.no_grad():
+                id_to_aux = self.model.score_samples(batch, sampling_inputs=sampling_inputs)
             
         return _format_score_results(id_to_aux)
 
-    def score_ensemble(self, pdb_contents: list[str]) -> dict[str, Any]:
+    def score_ensemble(self, pdb_contents: list[str], verbose: Optional[bool] = None) -> dict[str, Any]:
         """
         Score a sequence using Potts parameters computed from an ensemble of structures.
         The sequence from the first structure is used for scoring.
@@ -423,23 +470,32 @@ class Caliby:
             pdb_contents: List of PDB/CIF strings representing the ensemble.
                 The first string in the list is treated as the primary conformer
                 and used to provide the sequence for scoring.
+            verbose: whether to show progress bars. Defaults to self.verbose.
 
         Returns:
             Dictionary containing 'seq' and 'scores'.
         """
+        if verbose is None:
+            verbose = self.verbose
+        
+        # Update sampling config locally
+        sampling_cfg = self.sampling_cfg.copy()
+        sampling_cfg.verbose = verbose
+
         # Prepare batch
         batch = _prepare_batch(self, pdb_contents)
 
         # Apply ensemble specific logic
-        ignore_mismatch = self.sampling_cfg.get("ensemble_ignore_res_idx_mismatch", False)
+        ignore_mismatch = sampling_cfg.get("ensemble_ignore_res_idx_mismatch", False)
         # Use primary res types since we are scoring the sequence from the primary structure
         batch = _apply_ensemble_logic(batch, use_primary_res_type=True, ignore_mismatch=ignore_mismatch, device=self.device)
 
         # Finalize inputs
-        batch, sampling_inputs = _finalize_constraints(batch, self.sampling_cfg, None)
+        batch, sampling_inputs = _finalize_constraints(batch, sampling_cfg, None)
 
-        with torch.no_grad():
-            id_to_aux = self.model.score_samples(batch, sampling_inputs=sampling_inputs)
+        with self._silence_tqdm(verbose):
+            with torch.no_grad():
+                id_to_aux = self.model.score_samples(batch, sampling_inputs=sampling_inputs)
 
         return _format_score_results(id_to_aux)
 
