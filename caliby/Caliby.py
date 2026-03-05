@@ -1,7 +1,5 @@
 import io
 import os
-import tarfile
-import urllib.request
 import contextlib
 import warnings
 import logging
@@ -17,6 +15,7 @@ import pandas as pd
 import numpy as np
 import random
 import tqdm.std
+from huggingface_hub import hf_hub_download
 from omegaconf import OmegaConf, DictConfig
 
 from atomworks.io.parser import parse as aw_parse
@@ -24,6 +23,7 @@ from atomworks.io.utils import non_rcsb
 from atomworks.io.utils.io_utils import to_cif_string
 
 from caliby.checkpoint_utils import get_cfg_from_ckpt
+from caliby.weights import HF_REPO_ID, MODEL_REGISTRY
 from caliby.data.data import to
 from caliby.data.datasets.atomworks_sd_dataset import sd_collator
 from caliby.data.transform.preprocess import preprocess_transform
@@ -65,9 +65,6 @@ class Caliby:
             deterministic: Whether to use deterministic behavior (slower).
             verbose: Whether to show progress bars and logging during sampling.
         """
-        # Determine base directory of the caliby package
-        base_dir = Path(__file__).resolve().parent
-
         # Default checkpoint path if not provided
         if checkpoint_path is None:
             # First check environment variable
@@ -75,29 +72,10 @@ class Caliby:
             if env_path:
                 checkpoint_path = env_path
             else:
-                # Select filename based on use_soluble
-                ckpt_name = "soluble_caliby.ckpt" if use_soluble else "caliby.ckpt"
-                
-                # Check possible locations
-                repo_path = base_dir.parent / "model_params/caliby" / ckpt_name
-                cache_path = Path.home() / ".cache/caliby/model_params/caliby" / ckpt_name
-                
-                if repo_path.exists():
-                    checkpoint_path = str(repo_path)
-                elif cache_path.exists():
-                    checkpoint_path = str(cache_path)
-                else:
-                    # Not found anywhere, trigger automatic download
-                    print(f"Weights not found for {'soluble_' if use_soluble else ''}caliby. Initiating automatic download...")
-                    self.download_weights()  # Defaults to ~/.cache/caliby
-                    
-                    if cache_path.exists():
-                        checkpoint_path = str(cache_path)
-                    else:
-                        raise FileNotFoundError(
-                            f"Model weights could not be found or downloaded to {cache_path}. "
-                            "Please check your internet connection or set CALIBY_CHECKPOINT_PATH manually."
-                        )
+                # Select model name based on use_soluble
+                model_name = "soluble_caliby" if use_soluble else "caliby"
+                cache_dir = Path.home() / ".cache/caliby"
+                checkpoint_path = self.download_weights(model_name, cache_dir)
         
         # Final check if user provided a path that doesn't exist
         if not Path(checkpoint_path).exists():
@@ -129,12 +107,20 @@ class Caliby:
         self.model.to(self.device)
 
     @staticmethod
-    def download_weights(target_dir: Optional[Union[str, Path]] = None) -> None:
+    def download_weights(
+        model_name: str = "caliby",
+        target_dir: Optional[Union[str, Path]] = None,
+    ) -> str:
         """
-        Download and extract model weights from Zenodo.
+        Download model weights from HuggingFace Hub.
 
         Args:
-            target_dir: Directory to extract weights into. Defaults to ~/.cache/caliby.
+            model_name: Name of the model to download. One of the keys in MODEL_REGISTRY
+                (e.g. "caliby", "soluble_caliby").
+            target_dir: Local directory to download weights into. Defaults to ~/.cache/caliby.
+
+        Returns:
+            Absolute path to the downloaded checkpoint file.
         """
         if target_dir is None:
             target_dir = Path.home() / ".cache/caliby"
@@ -142,34 +128,21 @@ class Caliby:
             target_dir = Path(target_dir)
 
         target_dir.mkdir(parents=True, exist_ok=True)
-        
-        tar_path = target_dir / "model_params.tar"
-        url = "https://zenodo.org/records/17263678/files/model_params.tar?download=1"
 
-        print(f"Downloading model weights to {tar_path}...")
-        try:
-            # Simple progress reporting
-            def progress(count, block_size, total_size):
-                if total_size > 0:
-                    percent = int(count * block_size * 100 / total_size)
-                    print(f"\rDownload progress: {percent}%", end="")
+        if model_name not in MODEL_REGISTRY:
+            raise ValueError(
+                f"Unknown model '{model_name}'. Available models: {list(MODEL_REGISTRY.keys())}"
+            )
 
-            urllib.request.urlretrieve(url, tar_path, reporthook=progress)
-            print("\nDownload complete.")
+        rel_path = MODEL_REGISTRY[model_name]
+        local_path = target_dir / rel_path
 
-            print(f"Extracting weights to {target_dir}...")
-            with tarfile.open(tar_path, "r") as tar:
-                tar.extractall(path=target_dir)
-            
-            # Clean up tar file
-            tar_path.unlink()
-            print("Extraction complete. Weights are ready.")
+        if not local_path.exists():
+            print(f"Downloading {rel_path} from HuggingFace ({HF_REPO_ID})...")
+            hf_hub_download(repo_id=HF_REPO_ID, filename=rel_path, local_dir=str(target_dir))
+            print("Download complete.")
 
-        except Exception as e:
-            print(f"Error during download/extraction: {e}")
-            if tar_path.exists():
-                tar_path.unlink()
-            raise
+        return str(local_path)
 
     def set_seed(self, seed: int, deterministic: bool = True) -> None:
         """Set global random seeds for Python, NumPy, PyTorch, and Lightning (if available).
@@ -230,19 +203,18 @@ class Caliby:
 
     def _load_model(self, ckpt_path: str, overrides: dict = None):
         """Load model, data config, and sampling config from checkpoint."""
-        # Load checkpoint once with weights_only=False (checkpoint contains Python objects like DictConfig).
-        # This also avoids loading the file twice.
+        # Load checkpoint with weights_only=False since Lightning checkpoints contain
+        # Python objects (e.g. DictConfig). LitSeqDenoiser.__init__ and load_state_dict
+        # apply legacy migration (migrate_legacy_cfg / migrate_legacy_state_dict) internally.
         model_cfg, ckpt = get_cfg_from_ckpt(ckpt_path)
         lit_sd_model = LitSeqDenoiser(model_cfg)
         lit_sd_model.load_state_dict(ckpt["state_dict"])
         lit_sd_model.eval()
-        
+
         # Instantiate data config
-        # Handle cases where data_cfg might depend on other configs or be missing
         if hasattr(model_cfg, 'data'):
             data_cfg = hydra.utils.instantiate(model_cfg.data)
         else:
-            # Fallback handling if data config is not in model config
             data_cfg = DictConfig({}) 
 
         # Load sampling config

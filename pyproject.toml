@@ -31,6 +31,7 @@ dependencies = [
     "torchtyping",
     "p_tqdm",
     "atomworks==2.2.0",
+    "huggingface_hub",
 ]
 
 [tool.setuptools.packages.find]
