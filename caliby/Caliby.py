@@ -230,9 +230,12 @@ class Caliby:
 
     def _load_model(self, ckpt_path: str, overrides: dict = None):
         """Load model, data config, and sampling config from checkpoint."""
-        # Load model using map_location to ensure it goes to the right device directly or CPU first
-        lit_sd_model = LitSeqDenoiser.load_from_checkpoint(ckpt_path, map_location=self.device).eval()
-        model_cfg, _ = get_cfg_from_ckpt(ckpt_path)
+        # Load checkpoint once with weights_only=False (checkpoint contains Python objects like DictConfig).
+        # This also avoids loading the file twice.
+        model_cfg, ckpt = get_cfg_from_ckpt(ckpt_path)
+        lit_sd_model = LitSeqDenoiser(model_cfg)
+        lit_sd_model.load_state_dict(ckpt["state_dict"])
+        lit_sd_model.eval()
         
         # Instantiate data config
         # Handle cases where data_cfg might depend on other configs or be missing
