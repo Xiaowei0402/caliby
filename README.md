@@ -136,7 +136,7 @@ Both this repository and Caliby are still under active development, so please re
 **Note: The following sections are the original README from Caliby for reference.**
 
 - [Installation](#installation)
-  - [Option 1: Basic `uv` installation](#option-1-basic-uv-installation)
+  - [Option 1: uv installation](#option-1-uv-installation)
   - [Option 2: Apptainer installation](#option-2-apptainer-installation)
 - [Download model weights](#download-model-weights)
 - [Usage](#usage)
@@ -151,6 +151,8 @@ Both this repository and Caliby are still under active development, so please re
     - [Position-wise constraints](#position-wise-constraints)
     - [Specifying symmetry positions](#specifying-symmetry-positions)
   - [Sidechain packing](#sidechain-packing)
+  - [Self-consistency evaluation with AlphaFold2](#self-consistency-evaluation-with-alphafold2)
+- [Testing](#testing)
 - [FAQs](#faqs)
 - [License](#license)
 - [Citation](#citation)
@@ -158,8 +160,8 @@ Both this repository and Caliby are still under active development, so please re
 # Installation
 Follow the below instructions for setting up the environment. After you've installed the environment, edit `env_setup.sh` to point to your environment directory, and run `source env_setup.sh` before running any scripts.
 
-## Option 1: Basic `uv` installation
-To run the scripts in this repository using `uv`:
+## Option 1: uv installation (preferred)
+To run the scripts in this repository, we recommend using `uv` for package management. If you don't already have `uv` installed, follow the official installation instructions [here](https://docs.astral.sh/uv/getting-started/installation/#installation-methods).
 
 Then, run the following commands to install the dependencies:
 ```
@@ -171,49 +173,59 @@ cd caliby
 ENV_DIR=envs  # or any other directory of your choice
 mkdir -p ${ENV_DIR}
 uv venv ${ENV_DIR}/caliby -p python3.12
-source $ENV_DIR/caliby/bin/activate
+source ${ENV_DIR}/caliby/bin/activate
 
-# Install the dependencies.
-uv pip sync uv_indexes.txt uv.lock -c pins.txt --index-strategy=unsafe-best-match
+# Install Caliby.
 uv pip install -e .
 ```
 
 ## Option 2: Apptainer installation
 If the above workflow does not work for you, and you instead need to run Caliby within an Apptainer container, first set `ENV_DIR` and `IMG` in `build_apptainer.sh` to the directory you want to use for the environment and the image path, respectively. Then, you can run `./build_apptainer.sh` to download the container and install the environment within the container
 
-After the setting up the container and environment, you can run Caliby scripts within the container by wrapping the script in `apptainer exec --nv`. For example, to run `examples/scripts/seq_des_multi.sh` within the container, you can run:
+After the setting up the container and environment, you can run Caliby scripts within the container by wrapping the script in `apptainer exec --nv`. For example, to run `examples/scripts/seq_des.sh` within the container, you can run:
 ```
 IMG=${PWD}/containers/pytorch_24.12.sif
 apptainer exec --nv \
   ${IMG} \
   bash -lc '
   source env_setup.sh
-  ./examples/scripts/seq_des_multi.sh
+  ./examples/scripts/seq_des.sh
 '
 ```
 
 ## Download model weights
-Weights are not included in the package due to size. You can download them automatically using the wrapper:
-
-```python
-from caliby import Caliby
-
-# Download to default location (~/.cache/caliby)
-Caliby.download_weights()
+Model weights are hosted on [HuggingFace](https://huggingface.co/ProteinDesignLab/caliby-weights). Weights are **automatically downloaded** on first run, so you can skip this step if you prefer. To pre-download all weights at once, run:
 ```
+./download_model_params.sh
+```
+This will download the weights into the `model_params/` directory (configurable via `MODEL_PARAMS_DIR` in `env_setup.sh`). These weights include the Caliby models, ProteinMPNN, and the Protpardelle-1c model.
 
-Alternatively, you can manually run `./download_model_params.sh`, which will download from [Zenodo](https://zenodo.org/records/17263678) and extract into the `model_params/` directory.
+We offer the following model checkpoints, specified via the `ckpt_name_or_path` argument:
 
-We offer two model checkpoints for Caliby:
-- `caliby.ckpt`: the default Caliby model trained on all chains in the PDB with 0.3Å Gaussian noise.
-- `soluble_caliby.ckpt`: SolubleCaliby, an analog to SolubleMPNN trained by excluding all annotated transmembrane proteins.
+**Sequence design:**
+
+| Model | `ckpt_name_or_path` | Description |
+|-------|---------|-------------|
+| Caliby | `caliby` (default) | Default model trained on all chains in the PDB with 0.3Å Gaussian noise. Trained on monomers only. |
+| SolubleCaliby | `soluble_caliby` | Analog to SolubleMPNN ([Goverde et al., 2024](https://www.nature.com/articles/s41586-024-07601-y)) trained by excluding all annotated transmembrane proteins. Trained on monomers only. |
+| SolubleCaliby v1 | `solublecaliby_v1` | SolubleCaliby trained on both monomers and interfaces |
+
+**Sidechain packing:**
+
+| Model | `ckpt_name_or_path` | Description |
+|-------|---------|-------------|
+| Caliby packer (0.0Å) | `caliby_packer_000` | Sidechain packer trained with 0.0Å noise |
+| Caliby packer (0.1Å) | `caliby_packer_010` | Sidechain packer trained with 0.1Å noise (recommended for most cases)|
+| Caliby packer (0.3Å) | `caliby_packer_030` | Sidechain packer trained with 0.3Å noise |
+
+If `ckpt_name_or_path` does not end with `.ckpt`, it is treated as a model name and automatically resolved and downloaded. If it ends with `.ckpt`, it is treated as a file path (e.g., `ckpt_name_or_path=/path/to/custom_model.ckpt`).
 
 # Usage
 
 ## Sequence design
-To design sequences for a set of PDBs, see `examples/scripts/seq_des_multi.sh`. This script takes in a `input_cfg.pdb_dir` and will design sequences for all PDBs in the directory.
+To design sequences for a set of PDBs, see `examples/scripts/seq_des.sh`. This script takes in a `input_cfg.pdb_dir` and will design sequences for all PDBs in the directory.
 
-To design sequences for a subset of PDBs within the directory, see `examples/scripts/seq_des_multi_subset.sh`. This script takes in a `input_cfg.pdb_dir` and a `input_cfg.pdb_name_list` (a list of filenames with extensions to use from the directory) and will design sequences for the PDBs specified in the list.
+To design sequences for a subset of PDBs within the directory, see `examples/scripts/seq_des_subset.sh`. This script takes in a `input_cfg.pdb_dir` and a `input_cfg.pdb_name_list` (a list of filenames with extensions to use from the directory) and will design sequences for the PDBs specified in the list.
 
 ## Backbone ensemble generation with Protpardelle-1c
 We found that instead of designing on a static structure, running sequence design on *synthetic ensembles* generated by Protpardelle-1c partial dfifusion produces sequences that are both more diverse and more likely to be predicted by AlphaFold2 to fold into the target structure. To generate ensembles with Protpardelle-1c in a format compatible with Caliby, we have provided a script in `examples/scripts/generate_ensembles.sh`.
@@ -222,12 +234,12 @@ For each PDB provided in `input_cfg.pdb_dir`, this script will generate `num_sam
 
 ## Ensemble-conditioned sequence design
 ### Sequence design with synthetic Protpardelle-1c ensembles
-After you've generated ensembles with Protpardelle-1c, you can run ensemble-conditioned sequence design with `examples/scripts/seq_des_multi_ensemble.sh`, which will run ensemble-conditioned sequence design on all ensembles in `input_cfg.conformer_dir`. You can use `examples/scripts/seq_des_multi_ensemble_subset.sh` to run on a subset of the ensembles by providing a `input_cfg.pdb_name_list` file.
+After you've generated ensembles with Protpardelle-1c, you can run ensemble-conditioned sequence design with `examples/scripts/seq_des_ensemble.sh`, which will run ensemble-conditioned sequence design on all ensembles in `input_cfg.conformer_dir`. You can use `examples/scripts/seq_des_ensemble_subset.sh` to run on a subset of the ensembles by providing a `input_cfg.pdb_name_list` file.
 
 ### Providing your own ensembles
-The Protpardelle-1c ensemble generation script described above will produce a directory structure that is compatible with the `seq_des_multi_ensemble.sh` script, but if you want to provide your own ensembles, you should format your ensembles as described below.
+The Protpardelle-1c ensemble generation script described above will produce a directory structure that is compatible with the `seq_des_ensemble.sh` script, but if you want to provide your own ensembles, you should format your ensembles as described below.
 
-Given a top-level directory passed into the `seq_des_multi_ensemble.sh` script (e.g., `cc95-epoch3490-sampling_partial_diffusion-ss1.0-schurn0-ccstart0.0-dx0.0-dy0.0-dz0.0-rewind150`), each subdirectory is named `<PDB_KEY>`, representing one ensemble. Inside each ensemble subdirectory, the following files are expected:
+Given a top-level directory passed into the `seq_des_ensemble.sh` script (e.g., `cc95-epoch3490-sampling_partial_diffusion-ss1.0-schurn0-ccstart0.0-dx0.0-dy0.0-dz0.0-rewind150`), each subdirectory is named `<PDB_KEY>`, representing one ensemble. Inside each ensemble subdirectory, the following files are expected:
   - **Primary conformer**: The original structure file (identified by `<PDB_KEY>.pdb` or `<PDB_KEY>.cif`) serving as the default representative conformer and is always included in the ensemble by default.
   - **Additional conformers**: All other `.pdb` or `.cif` files in the directory are treated as conformer files, which will be ordered by their natural alphabetical order with python's `natsort` library.
 
@@ -238,9 +250,11 @@ All sequence design scripts automatically save the global energy of the sequence
 
 You can also score a sequence against an ensemble of backbones via `examples/scripts/score_ensemble.sh`, where the ensembles should be provided in the same format as described in the previous section. When scoring a sequence against an ensemble, the sequence corresponding to the primary conformer will be scored, and the sequences of the additional conformers will be ignored.
 
+When scoring proteins, you can also save residue-level conditional energies by setting `save_local_conditionals=true` when running scoring scripts. This will save `.npy` files containing outputs of shape `(N, 32)` for each scored example, where N is the length of the protein and 32 is our vocabulary size. These can be interpreted as the conditional energy for each possible amino acid at position i, assuming all other positions are fixed (note that lower energy = more favorable). To see which tokens correspond to which indices, you can run `import caliby.data.const as const; print(const.AF3_ENCODING.token_to_idx)`. Note that we don’t use the non-protein tokens in the vocabulary, so you should only look at the 21 tokens given by `const.AF3_ENCODING.protein_tokens`.
+
 ## Additional sequence design options
 
-All sequence design options can be found in `caliby/configs/seq_des/atom_mpnn_inference.yaml`. These options can be overridden from `seq_des_multi.sh` and `seq_des_multi_ensemble.sh` via the `sampling_cfg_overrides` argument using hydra override syntax, e.g. `++sampling_cfg_overrides.omit_aas=["C"]` or `++sampling_cfg_overrides.potts_sampling_cfg.potts_sweeps=5000`.
+All sequence design options can be found in `caliby/configs/seq_des/atom_mpnn_inference.yaml`. These options can be overridden from `seq_des.sh` and `seq_des_ensemble.sh` via the `sampling_cfg_overrides` argument using hydra override syntax, e.g. `++sampling_cfg_overrides.omit_aas=["C"]` or `++sampling_cfg_overrides.potts_sampling_cfg.potts_sweeps=5000`.
 
 ### Globally omit certain amino acids
 Caliby can omit certain amino acids from design via the `omit_aas` argument. This should be specified as a list of amino acids to omit, e.g. `["C", "G"]`.
@@ -259,7 +273,7 @@ Caliby also supports applying various constraints on certain residues, specified
 
 If `pos_constraint_csv` is not provided, Caliby will redesign all positions. If a column is not present in the CSV, Caliby will not apply any constraints for that column. If a particular column is included in the CSV, but its value for the `pdb_key` at that row is empty, Caliby will not apply that constraint for that PDB.
 
-For an example constraint CSV file, see `examples/example_data/pos_constraint_csvs/native_pdb_constraints.csv`. For example usage, see `examples/scripts/seq_des_multi_constraints.sh` and `examples/scripts/seq_des_multi_ensemble_constraints.sh`.
+For an example constraint CSV file, see `examples/example_data/pos_constraint_csvs/native_pdb_constraints.csv`. For example usage, see `examples/scripts/seq_des_constraints.sh` and `examples/scripts/seq_des_ensemble_constraints.sh`.
 
 In general, residue index positions should be specified by the `label_seq_id` column, *not the `auth_seq_id` column*. To view positions of the sequence using the `label_seq_id` in PyMOL, you can run `set cif_use_auth, off` in PyMOL before loading in the PDB file.
 
@@ -269,7 +283,19 @@ Caliby supports specifying symmetry positions for tying sampling across residue 
 For example usage in sequence design and ensemble generation, see the scripts under the `examples/scripts/homooligomers` directory. We also provide a script to quickly generate a symmetry_pos entry for a homooligomer at `examples/scripts/homooligomers/make_homooligomer_symmetry_pos.sh`, which can be used to print out a symmetry_pos entry by specifying chain IDs and residue ranges.
 
 ## Sidechain packing
-We plan to add sidechain packing support natively within Caliby in the future. For now, we recommend using Full-Atom MPNN (FAMPNN) for sidechain packing. Please see more details at the official repository for FAMPNN: https://github.com/richardshuai/fampnn.
+Caliby supports sidechain packing via a diffusion-based sidechain packing module. Given a backbone structure and sequence, the packer predicts sidechain coordinates by denoising in a local backbone frame.
+
+To run sidechain packing, see `examples/scripts/sidechain_pack.sh`. This script takes in a `input_cfg.pdb_dir` and will pack sidechains for all PDBs in the directory, saving the packed structures as CIF files. You can configure the number of diffusion steps and step scale via `sampling_cfg_overrides`.
+
+## Self-consistency evaluation with AlphaFold2
+This repository can evaluate designed sequences by predicting their structures with single-sequence AlphaFold2 and comparing against the design input. This produces metrics including scRMSD (CA RMSD between designed and predicted structures), average CA pLDDT, and TM-score.
+
+To run self-consistency evaluation, first install the AF2 dependencies:
+```
+uv pip install -e ".[af2]"
+```
+
+Then, add `run_self_consistency_eval=true` to any sequence design command (`seq_des.py` or `seq_des_ensemble.py`). For an example with ensemble-conditioned design, see `examples/scripts/seq_des_and_refold.sh`. This will run sequence design, predict the designed sequences with AF2, and save self-consistency metrics to `self_consistency_metrics.csv` in the output directory.
 
 # FAQs
 

@@ -3,7 +3,7 @@ seed: 0
 num_workers: 8  # for dataloading
 
 # Inputs
-ckpt_path: null
+ckpt_name_or_path: caliby
 out_dir: null
 
 # PDB file inputs
@@ -21,6 +21,9 @@ include_primary_conformer: true
 # e.g. 2fyzA,"A1-100,B1-100","A1-100"
 pos_constraint_csv: null
 
+# Self-consistency evaluation
+run_self_consistency_eval: false
+
 # Sampling config
 sampling_cfg_overrides:
   batch_size: 4
@@ -31,9 +34,16 @@ sampling_cfg_overrides:
 seq_des_cfg:
   model_name: "atom_mpnn"
   atom_mpnn:
-    ckpt_path: ${ckpt_path}
+    ckpt_name_or_path: ${ckpt_name_or_path}
     sampling_cfg: caliby/configs/seq_des/atom_mpnn_inference.yaml
     overrides: ${sampling_cfg_overrides}
+
+# Structure prediction model args (used when run_self_consistency_eval is true)
+struct_pred_cfg:
+  model_name: "af2"
+  base_cfg: caliby/configs/struct_pred/struct_pred_base.yaml
+  af2:
+    data_dir: null
 
 hydra:
   run:

@@ -5,6 +5,7 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "caliby"
 version = "0.1"
+description = "Potts model-based protein sequence design conditioned on structural ensembles"
 requires-python = ">=3.12"
 dependencies = [
     "torch>=2.6.0",

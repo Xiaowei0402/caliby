@@ -90,6 +90,14 @@ class SeqDenoiser(nn.Module):
         return self.denoiser.potts_sample(batch, sampling_inputs)
 
     @torch.no_grad()
+    def sidechain_pack(self, batch: dict[str, TensorType["b ..."]], sampling_inputs: dict[str, Any]) -> list:
+        """Run sidechain packing."""
+        if self.task not in ["scn_pack"]:
+            raise ValueError(f"sidechain_pack is only supported for task='scn_pack', got '{self.task}'")
+        batch["noise"] = None
+        return self.denoiser.sidechain_pack(batch, sampling_inputs=sampling_inputs)
+
+    @torch.no_grad()
     def score_samples(self, batch: dict[str, TensorType["b ..."]], sampling_inputs: dict[str, Any]) -> dict[str, Any]:
         """
         Score samples using Potts parameters computed from input backbones.
@@ -119,7 +127,7 @@ class SeqDenoiser(nn.Module):
             batch["example_id"][bi]: {
                 "atom_array": batch["atom_array"][bi],
                 "U": U[bi].cpu().item(),
-                "U_i": U_i[bi].cpu(),
+                "U_i": U_i[bi][batch["token_pad_mask"][bi].bool()].cpu(),
             }
             for bi in range(len(batch["example_id"]))
         }

@@ -5,7 +5,6 @@ num_workers: 8  # for dataloading
 # Inputs
 ckpt_name_or_path: caliby
 out_dir: null
-save_local_conditionals: false
 
 # PDB file inputs
 input_cfg:
@@ -14,17 +13,34 @@ input_cfg:
   pdb_name_ext: ""  # if pdb_name_list does not have extensions, add this extension
   n_subsample: null  # randomly sample this many pdb keys, null to use all
 
+# Positional constraints: supports columns in [pdb_key,fixed_pos_seq,fixed_pos_scn,fixed_pos_override_seq,pos_restrict_aatype]
+# e.g. 2fyzA,"A1-100,B1-100","A1-100"
+pos_constraint_csv: null
+
+# Self-consistency evaluation
+run_self_consistency_eval: false
+
 # Sampling config
 sampling_cfg_overrides:
-  batch_size: 16
+  batch_size: 4
+  num_seqs_per_pdb: 16  # number of sequences to sample per pdb
+  omit_aas: null  # exclude certain aatypes globally, e.g. ["C", "G"]. "X" is always excluded.
   num_workers: ${num_workers}
 
+# Sampling config
 seq_des_cfg:
   model_name: "atom_mpnn"
   atom_mpnn:
     ckpt_name_or_path: ${ckpt_name_or_path}
     sampling_cfg: caliby/configs/seq_des/atom_mpnn_inference.yaml
     overrides: ${sampling_cfg_overrides}
+
+# Structure prediction model args (used when run_self_consistency_eval is true)
+struct_pred_cfg:
+  model_name: "af2"
+  base_cfg: caliby/configs/struct_pred/struct_pred_base.yaml
+  af2:
+    data_dir: null
 
 hydra:
   run:

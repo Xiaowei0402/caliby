@@ -12,6 +12,7 @@ from omegaconf import DictConfig, OmegaConf
 from tqdm import tqdm
 
 from caliby.eval.eval_utils.eval_setup_utils import get_pdb_files
+from caliby.weights import ensure_dir
 
 
 def _import_protpardelle(cfg: DictConfig):
@@ -19,6 +20,8 @@ def _import_protpardelle(cfg: DictConfig):
 
     We set dummy paths since they're not required for partial diffusion.
     """
+    ensure_dir(f"{cfg.model_params_path}/proteinmpnn")
+    ensure_dir(f"{cfg.model_params_path}/protpardelle-1c")
     os.environ["PROTPARDELLE_OUTPUT_DIR"] = f"{cfg.out_dir}/protpardelle_outputs_temp"
     os.environ["FOLDSEEK_BIN"] = "."
     os.environ["ESMFOLD_PATH"] = "."
@@ -66,6 +69,9 @@ def main(cfg: DictConfig):
         for save_dir in all_save_dirs:
             out_dir_i = f"{out_dir}/{save_dir.parent.name}"
             Path(out_dir_i).mkdir(parents=True, exist_ok=True)
+            dest_path = Path(out_dir_i) / save_dir.name
+            if dest_path.exists():
+                shutil.rmtree(dest_path)
             shutil.move(save_dir, out_dir_i)
 
 

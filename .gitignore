@@ -1,5 +1,6 @@
 .gitignore
 
+archive/
 model_params/
 examples/outputs
 .vscode
@@ -180,3 +181,5 @@ wandb/
 tests_output/
 tools/
 outputs/
+CLAUDE.md
+.claude
