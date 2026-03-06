@@ -73,7 +73,7 @@ class Caliby:
                 checkpoint_path = env_path
             else:
                 # Select model name based on use_soluble
-                model_name = "soluble_caliby" if use_soluble else "caliby"
+                model_name = "solublecaliby_v1" if use_soluble else "caliby"
                 cache_dir = Path.home() / ".cache/caliby"
                 checkpoint_path = self.download_weights(model_name, cache_dir)
         
